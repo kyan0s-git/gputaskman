@@ -22,7 +22,7 @@ import urllib.request
 from dataclasses import dataclass, field
 
 from .gguf import GgufInfo, is_gguf, read_gguf
-from .procinfo import MappedModel, ProcDetail, file_key, make_model
+from .procinfo import SECRET_FLAGS, MappedModel, ProcDetail, file_key, make_model
 
 MiB = 1 << 20
 KV_TYPE_BYTES = {"f32": 4, "f16": 2, "bf16": 2, "q8_0": 34 / 32, "q4_0": 18 / 32, "q4_1": 20 / 32,
@@ -128,7 +128,6 @@ _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _keyed_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
 
 
-_SECRET_FLAGS = ("--api-key", "--api-key-file")
 UNAUTHORIZED = object()  # _get result for HTTP 401: the server wants a key
 
 
@@ -160,10 +159,10 @@ def redact_cmdline(cmd: list[str]) -> list[str]:
         if hide:
             out.append("***")
             hide = False
-        elif arg in _SECRET_FLAGS:
+        elif arg in SECRET_FLAGS:
             out.append(arg)
             hide = True
-        elif "=" in arg and arg.split("=", 1)[0] in _SECRET_FLAGS:
+        elif "=" in arg and arg.split("=", 1)[0] in SECRET_FLAGS:
             out.append(arg.split("=", 1)[0] + "=***")
         else:
             out.append(arg)
@@ -422,13 +421,15 @@ def _merge_api(files: list[MappedModel], server: ServerInfo | None, host: Server
                                        is_gguf(server.model_path), "api"))
     for front in (s for s in (server, host) if s and s.kind == "ollama"):
         for f in files:
+            if not f.has_model_evidence:
+                continue
             names = set((f.store_name or "").split(", "))
             for om in front.models:
                 if om["name"] in names:
                     f.add_source("api")
                     matched.append(om)
     lms = host if host and host.kind == "lmstudio" else (server if server and server.kind == "lmstudio" else None)
-    primary = [f for f in files if f.kind not in _SIDE_KINDS]
+    primary = [f for f in files if f.has_model_evidence and f.kind not in _SIDE_KINDS]
     if lms and len(lms.models) == 1 and len(primary) == 1:  # LM Studio keys don't map to paths; only pair 1:1
         primary[0].add_source("api")
         matched.append(lms.models[0])
@@ -449,6 +450,9 @@ def build_view(d: ProcDetail, vram: float, shared: float, server: ServerInfo | N
     files = [dataclasses.replace(m, sources=list(m.sources)) for m in d.models]  # cached details stay untouched
     matched = _merge_api(files, server, host)
     for m in files:
+        if not m.has_model_evidence:
+            v.other_files.append(m)
+            continue
         g = read_gguf(m.path) if m.gguf else None
         if g is not None and not g.error:
             v.models.append(g)
