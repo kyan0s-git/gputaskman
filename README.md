@@ -780,6 +780,7 @@ reading is NVML's memory-activity percentage, **not measured bandwidth in GB/s**
 | stable-diffusion.cpp (`--diffusion-model`) | Diffusion, text-encoder and VAE files from launch arguments; no LLM memory breakdown |
 | Hugging Face cache | `models--org--repo` paths are named `org/repo` |
 | Other AI runtimes | DLL detection, plus model files installed with the app (marked *not proven loaded*) |
+| Unknown apps / custom server flags | Validated model-like file paths in launch arguments, marked `path-arg` (*not proven loaded*); no runtime tag required |
 | Handy | Reads selected model from settings and bounded load/start/preview/unload events from `handy.log`; selection is not load evidence and log events are historical, not proof of current residency |
 | WinML / local helper processes | GPU-backed execution is in scope; generic process counters and runtime detection only. No WinML-specific model/session or client-to-helper attribution yet |
 | Windows Studio Effects | Only any observable GPU portion is in scope. NPU inference is out of scope; do not interpret GPU camera/render activity as proof of model execution |
@@ -821,17 +822,43 @@ Every model row shows its **evidence**, strongest first:
 |---|---|
 | `api` | The runtime's local API reports the model as loaded |
 | `mapped` | Windows shows the file memory-mapped into the process right now |
-| `cmdline` | The file was a launch argument (`-m model.gguf`) |
+| `cmdline` | The file was passed under a recognized model flag (`-m model.gguf`) |
+| `path-arg` | A model-like file was passed at launch under another flag or positionally; not proven loaded |
 | `installed` | Found in the app's install or data folder; nothing proves it is loaded |
 | Handy settings / log | Settings show selection; timestamped log events show what Handy reported, not current residency |
 
-Two sources including `api` or `mapped` show as **confirmed**. Runtime logs can report model events,
+Two of `api`, `mapped`, and `cmdline`, including `api` or `mapped`, show as **confirmed**.
+`path-arg` does not count as corroboration. Runtime logs can report model events,
 but are displayed as timestamped history and do not prove current residency. Model-store folders
 only supply a friendly name. The authoritative model *kind* comes from GGUF header keys: `decision.type` marks a
 decision model (for example [Laya](https://huggingface.co/ggml-org/Laya-GGUF)), `pooling_type`
 an embedding model or reranker, `stt.*` a speech model, and a causal model with layers and a
 trained context an LLM. llama-server's `/v1/models` `output_modalities` (`text`, `decisions`)
 confirms it. Non-causal encoders such as Laya allocate no KV cache, so none is estimated.
+
+For an unknown server, both `--native C:\models\model.gguf` and
+`--native=C:\models\model.gguf` can identify a **path argument**, as can a positional model path.
+Existing `--model` handling remains `cmdline` evidence. The automatic fallback considers
+`.gguf`, `.ggml`, `.safetensors`, `.onnx`, `.pt`, `.pth`, `.bin`, `.engine`, `.plan`, `.tflite`
+and `.ckpt` files. It requires a regular file: GGUF must have the four-byte `GGUF` magic;
+`.bin`, `.pt`, `.pth` and `.ckpt` need at least 64 MiB or a recognized model store; the other
+formats need at least 4 MiB. These checks identify plausible files, not proof of model loading.
+
+The fallback examines at most 256 argument tokens after the executable and attempts at most
+16 distinct model-extension paths per scan, including unsuccessful attempts. It does not walk
+directories or expand shell expressions. Relative paths use the target process's current working
+directory, never the monitor's; unavailable cwd means relative paths are skipped. A process may
+have changed cwd since launch, so this is not proof of the original file selection. Special and
+privacy-protected paths are skipped, as are API-key and key-file arguments. Only the GGUF magic
+is read from fallback model files; full headers and weights are not read. Existing cached store
+metadata may supply a friendly name.
+
+A `path-arg`-only match changes neither process classification nor API probing and supplies no
+weights, KV-cache or GPU-placement estimate. JSON preserves it in `model_files[].sources`;
+unobserved file RAM residency is `resident: null`, not zero. Mapped, recognized-flag or exact API
+file-identity evidence can support the existing richer analysis; store-name similarity alone
+cannot upgrade a path argument. Installed-folder discovery still requires a recognized AI runtime.
+This fallback is fixture-tested; the original unknown-server/GPU workload is **not hardware-validated**.
 
 When a file lacks specific kind metadata, known local decision-model names (`openjev`, `laya`,
 `julia-1`, `lev`, `kev`) supply a **likely decision model (name)** hint. Matching uses delimited
@@ -863,8 +890,9 @@ recipe, and a log-format change can break it. The runtime-agnostic answer is to 
 opened during the load: Windows kernel file-I/O ETW events record which process opened which model
 file. Combined with that process's VRAM jump, this identifies the model without app-specific code.
 It needs elevation and must already be running when the load happens, so it is planned as an
-opt-in mode. Until then, unknown apps show their runtime DLLs, VRAM, engine activity, and installed
-candidates. Reading model names out of another process's memory is deliberately not done.
+opt-in mode. Until then, unknown apps show their observable runtime DLLs, VRAM, engine activity and
+validated path arguments; recognized AI runtimes can also show installed candidates.
+Reading model names out of another process's memory is deliberately not done.
 
 Identification is designed to stay cheap. Measured on one Windows machine:
 
@@ -874,6 +902,7 @@ Identification is designed to stay cheap. Measured on one Windows machine:
 | Windows adapter discovery (DXGI + exact-LUID PnP identity + PCI location, no telemetry sample) | ~0.86 ms median, 2.60 ms max in 30 warm reads, 26.1 ms first/cold call (Windows 11 build 28000, RTX Spark N1X, driver 32.0.16.2114); same machine without the PnP probe: ~0.36 ms median | Once at startup; TUI rediscovery every 5 s. PnP uses fixed buffers, one interface lookup per adapter and at most two name-property reads, no path/device enumeration or retries. Synchronous OS calls are not a hard latency bound. Other drivers, virtual displays and multi-GPU laptops unmeasured; provider reconstruction has additional driver-dependent cost |
 | Windows NVML handle reacquisition (no telemetry sample) | ~8.7 ms median, 9.3 ms max in 30 reads (Windows 11 build 26340, RTX 4080 SUPER, NVIDIA 630.20) | Every 5 s per active collector; retries initialization after NVML session-loss errors. Other drivers unmeasured |
 | Memory-map scan (DLLs + mapped files) | 1-50 ms per process | New processes, a 64 MiB / 10% memory change, or every 2 min; at most 150 ms per refresh |
+| Model-path argument fallback | 0.14 ms median / 0.20 ms max for 256 non-model arguments; 5.51 / 6.58 ms for 16 local GGUF paths; 0.18 / 0.62 ms for 16 missing paths (30 warm reads, Windows 11 build 26340, x64, Python 3.13.17; synthetic files, no GPU workload). First 16-file call: 7.74 ms | Same cached scan cadence as memory maps; at most 256 tokens and 16 candidate paths, no directory walk or full GGUF headers. Counts bound work, not synchronous filesystem latency; other platforms and network filesystems unmeasured |
 | GGUF header, model-store manifests | ms, cached | Once per file / every 60 s |
 | Local API probes | ms, local only | llama-server `/v1/models` only when its model path changes |
 | vLLM `/v1/models` | 1.32 ms median, 21.36 ms max in 30 loopback fixture GETs; cached lookup ~0.0004 ms (Windows 11 build 28000, ARM64; no vLLM runtime/GPU workload) | One GET, 0.5 s timeout and 4 MiB response cap; success cached 3 s, misses/401 cached 30 s. No redirects; actual Linux/vLLM latency unmeasured |

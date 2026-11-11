@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+import stat
 import sys
 import time
 from dataclasses import dataclass, field
@@ -42,6 +43,9 @@ AI_RUNTIMES = {"llama.cpp", "whisper.cpp", "ggml", "PyTorch", "MLX", "TensorRT",
 _RUNTIME_RX = [(tag, re.compile("|".join(fnmatch.translate(p) for p in pats))) for tag, pats in RUNTIMES]
 MODEL_EXTS = {".gguf", ".ggml", ".safetensors", ".onnx", ".pt", ".pth", ".bin", ".engine", ".plan", ".tflite", ".ckpt"}
 AMBIGUOUS_EXTS = {".bin", ".pt", ".pth", ".ckpt"}  # also used for caches/tiles, so require size or a model store
+SECRET_FLAGS = ("--api-key", "--api-key-file")
+PATH_ARG_TOKENS = 256
+PATH_ARG_CANDIDATES = 16
 _NOT_MODELS = {".dll", ".exe", ".sys", ".mui", ".ttf", ".ttc", ".otf", ".dat", ".db", ".nls", ".pak", ".mun"}
 BROWSERS = {"msedge.exe", "chrome.exe", "firefox.exe", "msedgewebview2.exe", "brave.exe", "opera.exe", "arc.exe", "vivaldi.exe",
             "chrome", "chromium", "chromium-browser", "firefox", "firefox-bin", "brave", "msedge", "opera", "vivaldi-bin",
@@ -80,9 +84,9 @@ _installed: dict[str, tuple[float, list[MappedModel]]] = {}
 class MappedModel:
     path: str
     size: int
-    resident: int  # bytes of the file currently in this process's RAM working set
+    resident: int | None  # bytes of the file in this process's RAM working set; None when unobserved
     gguf: bool
-    sources: list[str] = field(default_factory=lambda: ["mapped"])  # mapped | cmdline | api | installed
+    sources: list[str] = field(default_factory=lambda: ["mapped"])  # mapped | cmdline | api | path-arg | installed
     store_name: str | None = None  # e.g. "qwen3:14b" from an Ollama manifest
     kind: str = ""  # GGUF kind: LLM, decision model, embedding model, ...
     kind_hint: str = ""  # name-based suggestion only; never changes loading evidence or GGUF math
@@ -96,11 +100,17 @@ class MappedModel:
             self.sources.append(source)
 
     @property
+    def has_model_evidence(self) -> bool:
+        return any(s in ("api", "mapped", "cmdline") for s in self.sources)
+
+    @property
     def evidence(self) -> str:
         s = set(self.sources)
         how = "+".join(x for x in ("api", "mapped", "cmdline") if x in s)
-        if len(s) >= 2 and s & {"api", "mapped"}:
+        if len(s & {"api", "mapped", "cmdline"}) >= 2 and s & {"api", "mapped"}:
             return f"confirmed ({how})"
+        if not how and "path-arg" in s:
+            return "path-arg (not proven loaded)"
         if not how and "installed" in s:
             return "installed, not proven loaded"
         return {"mapped": "in use (mapped)", "cmdline": "launch arg", "api": "reported (api)"}.get(how, how)
@@ -128,7 +138,11 @@ class ProcDetail:
 
     @property
     def is_ai(self) -> bool:
-        return bool(self.models) or any(r in AI_RUNTIMES for r in self.runtimes)
+        return self.has_model_evidence or any(r in AI_RUNTIMES for r in self.runtimes)
+
+    @property
+    def has_model_evidence(self) -> bool:
+        return any(m.has_model_evidence for m in self.models)
 
     @property
     def is_diffusion(self) -> bool:
@@ -208,11 +222,16 @@ def file_key(path: str) -> tuple[int, int] | str:
     return (st.st_dev, st.st_ino) if st.st_ino else os.path.normcase(os.path.abspath(path))
 
 
-def _models_from_cmdline(cmd: list[str]) -> list[str]:
-    paths = []
+def _model_flags(cmd: list[str]) -> set[str]:
     flags = {"-m", "--model", "--mmproj", "-md", "--model-draft", "--lora"}
     if _is_diffusion_cmdline(cmd):
         flags.update(("--diffusion-model", "--vae", "--llm"))
+    return flags
+
+
+def _models_from_cmdline(cmd: list[str]) -> list[str]:
+    paths = []
+    flags = _model_flags(cmd)
     for i, arg in enumerate(cmd):
         val = None
         key, sep, value = arg.partition("=")
@@ -231,6 +250,76 @@ def _is_model_file(ext: str, size: int, gg: bool, store: str | None) -> bool:
     if ext in AMBIGUOUS_EXTS:
         return size >= 64 * MiB or store is not None
     return size >= 4 * MiB
+
+
+def _models_from_path_args(d: ProcDetail) -> list[MappedModel]:
+    """Bounded file hints, not model selection: no model contents beyond GGUF magic."""
+    cmd = d.cmdline[1:PATH_ARG_TOKENS + 1]
+    flags = _model_flags(cmd)
+    found: list[MappedModel] = []
+    seen: set[str] = set()
+    cwd, cwd_checked = "", False
+    skip_next, hide_secret, positional = False, False, False
+    for arg in cmd:
+        if hide_secret:
+            hide_secret = False
+            continue
+        key, sep, value = arg.partition("=")
+        if key in SECRET_FLAGS:
+            hide_secret, skip_next = not sep, False
+            continue
+        if skip_next:
+            skip_next = False
+            continue
+        if not positional and arg == "--":
+            positional = True
+            continue
+        if not positional and key in flags:
+            skip_next = not sep
+            continue
+        if not positional and arg.startswith("-"):
+            if not sep:
+                continue
+            path = value
+        else:
+            path = arg
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in MODEL_EXTS or "\0" in path or "://" in path or _skip_path(path):
+            continue
+        spelling = os.path.normcase(path)
+        if spelling in seen:
+            continue
+        if len(seen) >= PATH_ARG_CANDIDATES:
+            break
+        seen.add(spelling)
+        if not os.path.isabs(path):
+            if not cwd_checked:
+                cwd_checked = True
+                try:
+                    cwd = psutil.Process(d.pid).cwd()
+                except (psutil.Error, OSError):
+                    pass
+            if not cwd or not os.path.isabs(cwd):
+                continue
+            path = os.path.join(cwd, path)
+            if not os.path.isabs(path):
+                continue  # e.g. a Windows drive-relative path on another drive
+        # Check normalized exclusions without rewriting symlink/.. traversal before stat/open.
+        if _skip_path(path) or _skip_path(os.path.normpath(path)):
+            continue
+        try:
+            info = os.stat(path)
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            gg = ext == ".gguf" and is_gguf(path)
+            if ext == ".gguf" and not gg:
+                continue
+            store = store_name(path)
+            if _is_model_file(ext, info.st_size, gg, store):
+                found.append(MappedModel(path, info.st_size, None, gg, ["path-arg"], store))
+        except (OSError, ValueError):
+            continue
+    return found
 
 
 def make_model(path: str, size: int, resident: int, gg: bool, source: str, store: str | None = None) -> MappedModel:
@@ -431,7 +520,7 @@ class ProcInspector:
             d.access_denied = True
             return
         dlls: set[str] = set()
-        models: dict[str, MappedModel] = {}
+        models: dict[tuple[int, int] | str, MappedModel] = {}
         for m in maps:
             path = m.path
             base = os.path.basename(path).lower()
@@ -463,10 +552,16 @@ class ProcInspector:
                 models[key].add_source("cmdline")
             else:
                 models[key] = make_model(path, os.path.getsize(path), 0, is_gguf(path), "cmdline")
+        for model in _models_from_path_args(d):
+            key = file_key(model.path)
+            if key in models:
+                models[key].add_source("path-arg")
+            else:
+                models[key] = model
         d.runtimes = _match_runtimes(dlls)
-        d.models = sorted(models.values(), key=lambda m: -m.size)
+        d.models = sorted(models.values(), key=lambda m: (not m.has_model_evidence, -m.size))
         ai = any(r in AI_RUNTIMES for r in d.runtimes)
-        d.candidates = installed_models(d.exe) if ai and not d.models else []
+        d.candidates = installed_models(d.exe) if ai and not d.has_model_evidence else []
 
     def prune(self, live_pids: set[int]) -> None:
         for pid in list(self._cache):
@@ -491,11 +586,12 @@ def classify(d: ProcDetail, engines: dict[str, float]) -> str:
         return "system"
     if d.is_diffusion:
         return "diffusion"
-    kinds = {MODEL_KINDS[m.kind] for m in d.models if m.kind in MODEL_KINDS and not m.kind_hint}
+    kinds = {MODEL_KINDS[m.kind] for m in d.models
+             if m.has_model_evidence and m.kind in MODEL_KINDS and not m.kind_hint}
     for k in ("LLM", "decision", "embedding", "speech"):
         if k in kinds:
             return k
-    if any(m.kind_hint == "decision model" for m in d.models):
+    if any(m.has_model_evidence and m.kind_hint == "decision model" for m in d.models):
         return "decision?"
     if d.vllm_role or "llama.cpp" in d.runtimes or n.startswith(LLM_NAMES):
         return "LLM"

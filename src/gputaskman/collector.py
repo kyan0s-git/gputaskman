@@ -91,8 +91,10 @@ class ProcRow:
                     parts.append(f"{self.llm.label(i)} {g.params_label} {g.quant}")
             return ", ".join(parts)
         if self.detail.models:
-            return ", ".join((m.store_name or os.path.basename(m.path)) +
-                             (f" ({m.kind_label})" if m.kind_hint else "") for m in self.detail.models[:2])
+            models = sorted(self.detail.models, key=lambda m: not m.has_model_evidence)
+            return ", ".join(("" if m.has_model_evidence else "path-arg (unproven): ") +
+                             (m.store_name or os.path.basename(m.path)) +
+                             (f" ({m.kind_label})" if m.kind_hint else "") for m in models[:2])
         if self.detail.candidates:
             return "installed (unproven): " + ", ".join(
                 f"{m.store_name or os.path.basename(m.path)} {gb(m.size)}" +
@@ -191,7 +193,7 @@ def _llm_wanted(row, shared_is_spill: bool) -> bool:
     not diffusion, and with measured GPU memory. Where spilled system memory is a counter of its own
     (WDDM, discrete DRM cards) both the dedicated and shared counters must be present; on an integrated
     GPU system memory is the memory and there is no spill counter, so dedicated alone suffices."""
-    if row.detail.is_diffusion or row.kind not in AI_KINDS or not (row.detail.models or row.kind == "LLM"):
+    if row.detail.is_diffusion or row.kind not in AI_KINDS or not (row.detail.has_model_evidence or row.kind == "LLM"):
         return False
     need = {"dedicated", "shared"} if shared_is_spill else {"dedicated"}
     return need <= row.gpu.available

@@ -254,6 +254,12 @@ def to_text(s: Snapshot, limit: int = 30) -> str:
                 out.append(f"   last Handy event: {p.handy.last_event} {p.handy.last_model or ''} "
                            f"at {p.handy.last_event_local} (runtime-reported history, not current GPU residency)")
         if not p.llm:
+            path_args = [m for m in p.detail.models if "path-arg" in m.sources]
+            if path_args:
+                out.append("")
+                out.append(f"== {p.name} ({p.pid_label})  VRAM {vram_label(p.gpu)}")
+                for m in path_args:
+                    out.append(f"   file: {m.store_name or m.path}  ({gb(m.size)})  evidence: {m.evidence}")
             continue
         out.append("")
         out.append(f"== {p.name} ({p.pid_label})  VRAM {vram_label(p.gpu)}")

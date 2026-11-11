@@ -76,8 +76,10 @@ This display-only choice applies to all GPUs and resets to full when the app res
 | Per-texture / per-buffer names | needs a debugger (PIX, Nsight) attached to the app | games, 3D apps |
 
 **Evidence** shows how a model was identified: `api` (the runtime says it is loaded), `mapped`
-(Windows shows the file mapped into the process right now), `cmdline` (a launch argument only).
-Two sources, including `api` or `mapped`, is shown as *confirmed*.
+(Windows shows the file mapped into the process right now), `cmdline` (a recognized model flag),
+`path-arg` (a model-like file passed at launch; not proven loaded), `installed` (an app-folder candidate).
+Two of `api`, `mapped`, and `cmdline`, including `api` or `mapped`, are shown as *confirmed*.
+`path-arg` alone does not identify a runtime or produce weights/KV estimates.
 
 **Local workloads only:** inference, decision models, vision, speech, training, graphics and video.
 Cloud-hosted models are outside this monitor's scope. DLLs identify runtimes, not models or tasks.
