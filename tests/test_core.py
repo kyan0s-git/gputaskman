@@ -285,15 +285,15 @@ class MemoryTests(unittest.TestCase):
         c.nvml = Mock(ok=False)
         c.counters = Mock(outside={})
         c.counters.sample.return_value = (
-            {1: {}}, {1: AdapterGpu(util_gpu=42.0)})
+            {1: {}}, {1: AdapterGpu(util_gpu=41.6)})
         c.inspector, c.prober = Mock(), Mock()
         with patch("gputaskman.collector.BACKEND", "wddm"):
             s = c.sample()
-        self.assertEqual((s.nv.source, s.nv.util_gpu), ("Windows WDDM", 42.0))
+        self.assertEqual((s.nv.source, s.nv.util_gpu), ("Windows WDDM", 42))
         self.assertIsNone(s.nv.temp)
         self.assertIsNone(s.nv.power_w)
         self.assertIn("GPU 42%", to_text(s))
-        self.assertEqual(to_dict(s)["device"]["util_gpu"], 42.0)
+        self.assertEqual(to_dict(s)["device"]["util_gpu"], 42)
 
     def test_lost_nvml_telemetry_is_explained_not_silent(self):
         c = Collector.__new__(Collector)

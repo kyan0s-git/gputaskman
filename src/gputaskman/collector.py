@@ -340,7 +340,7 @@ class Collector:
             if self.adapter.vendor_id == VENDOR_AMD:
                 nv = self.adl.sample() or self.amdsmi.sample()
             elif self.adapter.vendor_id == VENDOR_INTEL and BACKEND == "wddm" and a and a.util_gpu is not None:
-                nv = DeviceTelemetry(index=self.gpu_index, source="Windows WDDM", util_gpu=a.util_gpu)
+                nv = DeviceTelemetry(index=self.gpu_index, source="Windows WDDM", util_gpu=round(a.util_gpu))
             else:
                 nv = None
         else:
