@@ -295,6 +295,40 @@ class MemoryTests(unittest.TestCase):
         self.assertIn("GPU 42%", to_text(s))
         self.assertEqual(to_dict(s)["device"]["util_gpu"], 42)
 
+    def test_integrated_intel_wddm_keeps_system_memory_out_of_vram(self):
+        memory = 776 * MiB
+        adapter = Adapter(1, "Intel Iris Xe Graphics", 0x8086, 128 * MiB, 8 * GiB, False)
+        c = Collector.__new__(Collector)
+        c.adapter = adapter
+        c.adapters = [adapter]
+        c.gpu_index, c.scan_budget, c.host, c.host_status = 0, None, None, ""
+        c.nvml = Mock(ok=False)
+        c.counters = Mock(outside={})
+        c.counters.sample.return_value = (
+            {1: {42: ProcGpu(dedicated=memory, shared=0, committed=memory)}},
+            {1: AdapterGpu(dedicated=0, shared=memory, util_gpu=41.6)})
+        c.inspector, c.prober = Mock(), Mock()
+        c.inspector.get.return_value = ProcDetail(42, "example.exe")
+        with patch("gputaskman.collector.BACKEND", "wddm"):
+            s = c.sample()
+        self.assertEqual((s.vram_total, s.vram_used, s.shared_used), (128 * MiB, 0, memory))
+        self.assertFalse(s.shared_is_spill)
+        self.assertEqual((s.nv.source, s.nv.util_gpu), ("Windows WDDM", 42))
+        self.assertIsNone(s.nv.temp)
+        self.assertIsNone(s.nv.power_w)
+        self.assertIsNone(s.nv.sm_clock)
+        self.assertTrue(adapter.integrated_intel)
+        self.assertFalse(Adapter(2, "Intel Arc B580", 0x8086, 12 * GiB, 8 * GiB, False).integrated_intel)
+        gpu = s.procs[0].gpu
+        self.assertEqual((gpu.dedicated, gpu.shared), (0, memory))
+        data = to_dict(s)
+        self.assertEqual(data["processes"][0]["vram_bytes"], 0)
+        self.assertEqual(data["processes"][0]["shared_bytes"], memory)
+        text = to_text(s)
+        self.assertIn("VRAM 0 MB / 128 MB", text)
+        self.assertIn("SHARED", text)
+        self.assertIn("shared (in system RAM) 776 MB", text)
+
     def test_lost_nvml_telemetry_is_explained_not_silent(self):
         c = Collector.__new__(Collector)
         c.adapter = Adapter(1, "RTX 3060", 0x10DE, 12 * GiB, 0, False, (5, 0, 0))
@@ -1638,7 +1672,7 @@ class UiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(app.query_one("#procs").get_cell("10", "GPU%").plain, "65")
                 hdr = app.query_one("#inspector", Static).content.renderables[0].plain
                 self.assertIn("compute 65%", hdr)
-                self.assertIn("spill(RAM) n/a", hdr)
+                self.assertIn("shared(RAM) n/a", hdr)
 
     async def test_unknown_process_memory_preserves_unattributed_adapter_usage(self):
         s = snapshot()

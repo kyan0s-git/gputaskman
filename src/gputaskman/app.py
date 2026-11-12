@@ -22,7 +22,7 @@ from .host import HostSample, HostSampler
 from .llm import gb, redact_cmdline
 from .nvml import NvDevice, format_metric
 from .recovery import LiveCollectors
-from .report import (DRM_RESIDENT_NOTE, METAL_NOTE, WSL_EMPTY, drm_note, has_engine_counters, has_spill_counters, has_wddm_counters,
+from .report import (DRM_RESIDENT_NOTE, METAL_NOTE, WSL_EMPTY, drm_note, has_engine_counters, has_shared_counters, has_wddm_counters,
                      inferred_note, intel_memory_note, vram_label, vram_total_label, wsl_note)
 
 KIND_STYLE = {
@@ -68,7 +68,7 @@ This display-only choice applies to all GPUs and resets to full when the app res
 | Layer | Source | Works for |
 |---|---|---|
 | **Device** telemetry | NVML, AMD ADL, optional AMD SMI, Intel WDDM activity on Windows; amdgpu or Intel (i915) sysfs on Linux | availability varies by GPU and driver |
-| **Per-process** VRAM, spill to RAM, per-engine load | Windows WDDM counters (dxgkrnl); DRM fdinfo for amdgpu or Intel (i915) on Linux | workloads visible to WDDM or DRM |
+| **Per-process** VRAM, shared RAM, per-engine load | Windows WDDM counters (dxgkrnl); DRM fdinfo for amdgpu or Intel (i915) on Linux | workloads visible to WDDM or DRM |
 | **Which runtime** (CUDA, HIP, Vulkan, D3D12, ggml, ONNX, PyTorch...) | DLLs mapped in the process | everything |
 | **Which model file** | memory-mapped files + command line | llama.cpp, stable-diffusion.cpp, LM Studio, Ollama |
 | **Model name & kind** (LLM, decision, embedding, speech) | GGUF header, Ollama/LM Studio/Hugging Face stores, local server APIs | GGUF family |
@@ -88,16 +88,16 @@ GGUF kind is missing. It does not confirm the kind, GPU residency, or execution.
 candidates remain unproven; engine activity is measured per process, not per model.
 
 **Linux / WSL:** on native Linux, per-process VRAM and SM/encoder/decoder load come from NVML
-(no spill or commit counters exist there, so those columns stay blank). **AMD GPUs on Linux**
+(no shared-memory or commit counters exist there, so those columns stay blank). **AMD GPUs on Linux**
 (`amdgpu`) use sysfs for the device and DRM fdinfo (`/proc/<pid>/fdinfo`) per process: VRAM,
-GTT (GPU memory in system RAM, shown as SPILL), and gfx/compute/video engine time (`n/a` for a new client's
+GTT (GPU memory in system RAM, shown as Shared), and gfx/compute/video engine time (`n/a` for a new client's
 first sample and for ROCm/HIP processes: their compute runs on `/dev/kfd` queues the kernel doesn't time per
-process). VRAM and SPILL are charged to a process only when its DRM clients are provably private: one holder,
+process). VRAM and Shared are charged to a process only when its DRM clients are provably private: one holder,
 opened through a render node, and no shared buffers. Otherwise they show `n/a` and the bytes stay unattributed;
 the inspector still shows the resident bytes it can reach (shared buffers included, so not added up). **Intel GPUs
 on Linux** (`i915`) take the same path: sysfs for the device (actual GT clock, throttle reasons), fdinfo for engine load and, on a discrete Arc, local-memory
-VRAM. On an integrated GPU a provably private client's system memory is its GPU memory in the VRAM column (SPILL stays
-`N/A`: system memory is its memory there, not spill); shared clients show `n/a`, with the resident bytes still in the inspector.
+VRAM. On an integrated GPU a provably private client's system memory is its GPU memory in the VRAM column (Shared stays
+`N/A`: system memory is its memory there); shared clients show `n/a`, with the resident bytes still in the inspector.
 `xe` cards are detected but their per-process fdinfo isn't
 decoded yet (rows show `n/a`). With no device-wide memory counter, an Intel card's VRAM used is a sum over the processes
 it can inspect (local memory on a discrete card, system memory on an integrated GPU; shared buffers can be counted twice; kernel-owned memory and uninspectable processes are missing), its total is
@@ -118,7 +118,7 @@ NVIDIA driver, owns video memory, so NVML can't attribute it to processes. The W
 process can *see*, so dwm can show nearly the whole card. VRAM here is what's charged to each
 process ("Local Usage" when available). The adapter counter is the total, not the sum of rows.
 
-**SPILL** = GPU-accessible system RAM. This can include pinned host buffers or intentional
+**Shared** = GPU-accessible system RAM. This can include pinned host buffers or intentional
 allocations, not just overflow. Large usage under VRAM pressure can indicate fallback;
 the counter alone does not prove it.
 
@@ -215,7 +215,7 @@ class GpuTaskManager(App):
         Binding("question_mark", "help", "Explain"),
     ]
     SORTS = [("VRAM", lambda r: -(r.gpu.shown_vram or 0)), ("GPU%", lambda r: -r.gpu.gpu_pct),
-             ("spill", lambda r: -r.gpu.shared), ("paged", lambda r: -r.gpu.paged_out),
+             ("Shared", lambda r: -r.gpu.shared), ("paged", lambda r: -r.gpu.paged_out),
              ("name", lambda r: r.name.lower())]
     SYSTEM_SORTS = [("RAM", lambda r: (r.ram is None, -(r.ram or 0))),  # unknown last; a measured 0 is not unknown
                     ("CPU%", lambda r: (r.cpu is None, -(r.cpu or 0)))]
@@ -297,7 +297,7 @@ class GpuTaskManager(App):
 
     def on_mount(self) -> None:
         t = self.query_one("#procs", DataTable)
-        cols = ["PID", "Process", "Kind", "Runtime", "VRAM", "Spill", "Paged", "GPU%", "3D", "Copy", "Video"]
+        cols = ["PID", "Process", "Kind", "Runtime", "VRAM", "Shared", "Paged", "GPU%", "3D", "Copy", "Video"]
         if self.system:
             cols += ["RAM", "CPU%"]
         for col in (*cols, "What's inside"):
@@ -729,12 +729,12 @@ class GpuTaskManager(App):
             wddm = has_wddm_counters(s, r)
             engines = has_engine_counters(s, r)
             split = engines and s.backend != "metal"  # Metal reports one GPU time, no per-engine split
-            spill = Text(gb(r.gpu.shared) if has_spill_counters(s, r) and r.gpu.shared >= 1 << 20 else "", justify="right",
+            shared = Text(gb(r.gpu.shared) if has_shared_counters(s, r) and r.gpu.shared >= 1 << 20 else "", justify="right",
                          style="bold red" if r.gpu.shared >= 256 << 20 and r.kind in ("LLM", "AI") and s.shared_is_spill
                          else "yellow")
             paged = Text(gb(r.gpu.paged_out) if wddm and r.gpu.paged_out >= 1 << 20 else "", justify="right", style="grey62")
             if (wddm or (s.backend == "drm" and not r.host)) and "shared" not in r.gpu.available:
-                spill = Text("n/a", justify="right", style="grey62")
+                shared = Text("n/a", justify="right", style="grey62")
             if wddm and not r.gpu.paged_available:
                 paged = Text("n/a", justify="right", style="grey62")
             system_cells = []
@@ -747,7 +747,7 @@ class GpuTaskManager(App):
                 Text(r.name),
                 Text(r.kind, style=KIND_STYLE.get(r.kind, "")),
                 Text(" ".join(r.detail.runtimes[:3]), style="grey70"),
-                Text(vram_label(r.gpu), justify="right", style="bold" if r.gpu.attributed else "grey62"), spill, paged,
+                Text(vram_label(r.gpu), justify="right", style="bold" if r.gpu.attributed else "grey62"), shared, paged,
                 pct(r.gpu.gpu_pct if engines else None),
                 pct(e.get("3d", 0) + e.get("compute", 0) if split else None),
                 pct(e.get("copy", 0) if split else None),
@@ -786,8 +786,8 @@ class GpuTaskManager(App):
         e = r.gpu.engines
         wddm = has_wddm_counters(s, r)
         engines = " ".join(f"{k} {v:.0f}%" for k, v in e.items() if v >= 0.5) or "idle"
-        hdr = Text.assemble(("VRAM ", "bold"), (vram_label(r.gpu), "bold"), "   spill(RAM) ",
-                            (gb(r.gpu.shared) if has_spill_counters(s, r) else "n/a",
+        hdr = Text.assemble(("VRAM ", "bold"), (vram_label(r.gpu), "bold"), "   shared(RAM) ",
+                            (gb(r.gpu.shared) if has_shared_counters(s, r) else "n/a",
                              "bold red" if r.gpu.shared > 256 << 20 and s.shared_is_spill else ""),
                             "   paged(est) ", gb(r.gpu.paged_out) if wddm and r.gpu.paged_available else "n/a",
                             "   engines ", engines if has_engine_counters(s, r) else "n/a")

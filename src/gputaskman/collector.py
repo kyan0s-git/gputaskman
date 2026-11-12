@@ -343,6 +343,13 @@ class Collector:
         luid = self.adapter.luid if self.adapter else (next(iter(per_luid), 0))
         procs = per_luid.get(luid, {})
         a = adapters.get(luid)
+        integrated_intel = BACKEND == "wddm" and self.adapter is not None and self.adapter.integrated_intel
+        if integrated_intel:
+            for gpu in procs.values():
+                if "dedicated" in gpu.available and gpu.dedicated > 0:
+                    gpu.shared += gpu.dedicated
+                    gpu.dedicated = 0
+                    gpu.available.add("shared")
         if BACKEND == "metal":
             nv = self.counters.device  # IOKit's device stats in the shape the header renders (no NVML on macOS)
         elif self.drm_card is not None:
@@ -372,7 +379,7 @@ class Collector:
             cuda=self.nvml.cuda_version if nv and nv.source == "NVML" else "", vram_total=total,
             vram_used=int(a.dedicated) if a and a.dedicated is not None else None,
             shared_used=int(a.shared) if a and a.shared is not None else None, backend=self.backend,
-            shared_is_spill=not (self.drm_card is not None and self.drm_card.integrated),
+            shared_is_spill=not (integrated_intel or (self.drm_card is not None and self.drm_card.integrated)),
         )
 
         snap.host_status = self.host_status

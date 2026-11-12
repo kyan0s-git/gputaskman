@@ -34,7 +34,7 @@ def has_wddm_counters(s: Snapshot, row: ProcRow) -> bool:
     return s.backend == "wddm" or row.origin == "windows"
 
 
-def has_spill_counters(s: Snapshot, row: ProcRow) -> bool:
+def has_shared_counters(s: Snapshot, row: ProcRow) -> bool:
     """Per-process GPU memory in system RAM: WDDM's non-local usage, or a DRM client's GTT (amdgpu) or
     system0 (Intel) bytes on Linux."""
     return (has_wddm_counters(s, row) or (s.backend == "drm" and not row.host)) and "shared" in row.gpu.available
@@ -126,7 +126,7 @@ def to_dict(s: Snapshot) -> dict:
             "gtt_resident_bytes": (int(p.gpu.resident_gtt) if s.backend == "drm" and not p.host
                                    and p.gpu.resident_gtt is not None else None),
             "vram_unattributed_reason": p.gpu.drm_reason or None if s.backend == "drm" and not p.host else None,
-            "shared_bytes": int(p.gpu.shared) if has_spill_counters(s, p) else None,
+            "shared_bytes": int(p.gpu.shared) if has_shared_counters(s, p) else None,
             "committed_bytes": int(p.gpu.committed) if wddm and "committed" in p.gpu.available else None,
             "paged_out_bytes": int(p.gpu.paged_out) if wddm and p.gpu.paged_available else None,
             "gpu_pct": round(p.gpu.gpu_pct, 1) if engines else None,
@@ -217,18 +217,18 @@ def to_text(s: Snapshot, limit: int = 30) -> str:
     out.append("")
     shown = s.procs[:limit]
     w = max([7] + [len(p.pid_label) for p in shown])  # host PIDs like W:120880 are wider
-    out.append(f"{'PID':>{w}}  {'PROCESS':<24} {'KIND':<10} {'RUNTIME':<24} {'VRAM':>9} {'SPILL':>8} {'PAGED':>8} {'GPU%':>5}  INSIDE")
+    out.append(f"{'PID':>{w}}  {'PROCESS':<24} {'KIND':<10} {'RUNTIME':<24} {'VRAM':>9} {'SHARED':>8} {'PAGED':>8} {'GPU%':>5}  INSIDE")
     for p in shown:
         wddm = has_wddm_counters(s, p)
-        spill = gb(p.gpu.shared) if has_spill_counters(s, p) and p.gpu.shared >= 1 << 20 else ""
+        shared = gb(p.gpu.shared) if has_shared_counters(s, p) and p.gpu.shared >= 1 << 20 else ""
         paged = gb(p.gpu.paged_out) if wddm and p.gpu.paged_out >= 1 << 20 else ""
         if (wddm or (s.backend == "drm" and not p.host)) and "shared" not in p.gpu.available:
-            spill = "N/A"
+            shared = "N/A"
         if wddm and not p.gpu.paged_available:
             paged = "N/A"
         pid = p.pid_label
         pct = f"{p.gpu.gpu_pct:.0f}" if has_engine_counters(s, p) else "n/a"
-        out.append(f"{pid:>{w}}  {p.name[:24]:<24} {p.kind:<10} {p.runtime[:24]:<24} {vram_label(p.gpu):>9} {spill:>8} "
+        out.append(f"{pid:>{w}}  {p.name[:24]:<24} {p.kind:<10} {p.runtime[:24]:<24} {vram_label(p.gpu):>9} {shared:>8} "
                    f"{paged:>8} {pct:>5}  {p.inside}")
     if any(p.gpu.inferred_by == "consistent" for p in shown):
         out.append(INFERRED_NOTE)

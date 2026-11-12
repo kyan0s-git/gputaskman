@@ -77,10 +77,13 @@ During desktop/browser activity, WDDM reported per-process VRAM and AMD ADL repo
 clocks, and ASIC power; temperature, memory activity, and PCIe readings were unavailable. Vulkan/ROCm
 workloads were not tested on this machine.
 
-Intel Arc on Windows can use WDDM's per-process memory and engine counters. When those counters are
-available, the device GPU activity is the busiest WDDM engine after combining its process counters.
-Intel temperature, power, clocks, and memory activity are not currently available on Windows.
-Arc B580 behavior is covered by mocked counters but has not been validated on Intel hardware.
+Intel adapters on Windows can use WDDM's per-process memory and engine counters. When those counters are
+available, device GPU activity is the busiest WDDM engine after combining its process counters. An Intel
+adapter reporting at most 512 MiB of dedicated memory and more shared system memory is treated as integrated:
+per-process local usage is shown as Shared RAM, not VRAM, while device dedicated and shared counters remain
+separate. This is a DXGI-capacity heuristic. Intel temperature, power, clocks, and memory activity are not
+currently available on Windows. Arc B580 behavior is covered by mocked counters but has not been validated
+on Intel hardware.
 
 Install [Git for Windows](https://git-scm.com/downloads/win) and
 [uv](https://docs.astral.sh/uv/getting-started/installation/) if needed. With WinGet:
@@ -202,15 +205,15 @@ kernel already exposes what's needed.
 | Per-process VRAM and GTT | `drm-resident-vram` / `drm-resident-gtt` (older kernels: `drm-memory-*`) and `drm-shared-*` in `/proc/<pid>/fdinfo/<fd>` |
 | Per-process engine load (gfx, compute, video) | `drm-engine-*` busy time, sampled twice (`n/a` until a new client has two samples); `n/a` for ROCm/HIP processes (see below) |
 
-GTT is GPU-accessible system RAM, so it fills the SPILL column (and `shared (in system RAM)` for
+GTT is GPU-accessible system RAM, so it fills the Shared column (and `shared (in system RAM)` for
 the device), like WDDM's non-local usage. On an APU (an integrated GPU, detected by amdgpu not
 reporting a VRAM vendor, a heuristic validated on one APU) GTT is the GPU's normal memory and "VRAM"
 is only a RAM carve-out, so GTT is still shown but never flagged as spill, and an LLM's memory is its
 VRAM plus GTT. The SDMA engine (`dma`) fills the COPY column. Paged stays blank: there is no commit
-counter. VRAM and SPILL are charged to a process only when nothing else can hold its bytes: each of
+counter. VRAM and Shared are charged to a process only when nothing else can hold its bytes: each of
 its DRM clients has exactly one visible holder, was opened through a render node (`/dev/dri/renderD*`),
 and reports zero bytes in every `drm-shared-*` region. Then its resident VRAM and GTT are its own and add
-up without double counting. Otherwise the process shows VRAM and SPILL as `n/a` (`null` in JSON, with
+up without double counting. Otherwise the process shows VRAM and Shared as `n/a` (`null` in JSON, with
 `vram_unattributed_reason`) and its bytes stay in *unattributed*:
 
 - **Shared client** (fd passing, fork; 1Password and its crash handler on the test desktop): one set of
@@ -262,7 +265,7 @@ covered by unit tests only and **not yet validated on AMD hardware**.
 | Device VRAM total | The size of the local-memory PCI window (`resource2`), an **estimate**: kernel-owned memory is missing from the sysfs view, resizable BAR rounds to a power of two, and a partial window can be smaller than the card, so the total can differ from the card's memory. A window under 1 GiB (an integrated GPU, or a discrete card without resizable BAR) shows `N/A` (`null` in JSON). Free memory is never shown for Intel |
 | Device VRAM used | The sum of its clients' resident memory: i915 has no device-wide counter, so buffers shared between processes can be counted twice, and kernel-owned memory and processes gputaskman can't inspect are missing. Local memory on a discrete card, system memory on an integrated GPU. The UI, `--once`, `--json` (`memory_note`) and `gputaskman diff` all say so. `n/a` when any client's memory is unknown |
 | Integrated or discrete | An iGPU has no `local0`, so a card with a local-memory window of 1 GiB or more is discrete, and so is any card whose fdinfo reports local memory, even when its window is smaller |
-| Per-process VRAM and SPILL | `drm-resident-local0` and `drm-resident-system0`, plus their `stolen-` regions (the firmware-reserved part of each), under the same private-client rules as AMD. On an integrated GPU there is no local memory: a provably private client's `system0` bytes are its GPU memory in the VRAM column, and SPILL stays `N/A` (system memory is its memory, not spill). On a discrete card `system0` is memory the GPU's buffers currently sit in, including buffers placed there on purpose, so SPILL there (like AMD's GTT) is where they are, not proof they were pushed out of VRAM. The shared gate needs only the regions the device has, so a discrete card with a missing `drm-shared-local0` still shows `n/a` (`legacy`), while an integrated client with shared buffers shows `n/a` (`shared_buffers`). A region value that can't be parsed makes that figure `n/a`, not a smaller number |
+| Per-process VRAM and Shared | `drm-resident-local0` and `drm-resident-system0`, plus their `stolen-` regions (the firmware-reserved part of each), under the same private-client rules as AMD. On an integrated GPU there is no local memory: a provably private client's `system0` bytes are its GPU memory in the VRAM column, and Shared stays `N/A` (system memory is its memory, not spill). On a discrete card `system0` is memory the GPU's buffers currently sit in, including buffers placed there on purpose, so Shared there (like AMD's GTT) is where they are, not proof they were pushed out of VRAM. The shared gate needs only the regions the device has, so a discrete card with a missing `drm-shared-local0` still shows `n/a` (`legacy`), while an integrated client with shared buffers shows `n/a` (`shared_buffers`). A region value that can't be parsed makes that figure `n/a`, not a smaller number |
 | Per-process engine load (3d, compute, copy, video) | `drm-engine-render`, `-compute`, `-copy`, `-video`, `-video-enhance` busy time, sampled twice. `n/a` where the driver reports none (before Gen 8). A class with several identical engines (`drm-engine-capacity-*`, such as video on an Arc) is not divided by its capacity, so one busy engine reads 100% |
 
 Device memory bandwidth and the PCIe link are `n/a`: i915 has no device-wide bandwidth counter, and its
@@ -308,7 +311,7 @@ through the same PDH array API as the Windows backend and streams them back once
 
 - **WSL VM (`vmwp.exe`)** is the exact total of Linux GPU memory, across every distro, WSLg, and
   Docker Desktop.
-- **Windows apps** appear as `W:<pid>` rows with their VRAM, spill, paged, and engine load.
+- **Windows apps** appear as `W:<pid>` rows with their VRAM, shared system memory, paged, and engine load.
   Windows and Linux PIDs are separate namespaces, so the prefix keeps them apart.
 - **Linux rows** get a size by matching `vmwp.exe`'s GPU contexts to Linux processes (below).
 
@@ -450,7 +453,7 @@ with the workload; the examples are not benchmarks.
 
 ![Compositor selected, showing local memory and the explanation of shared-surface accounting](docs/screenshots/compositor.png)
 
-**GPU-accessible system RAM, sorted by the Spill column**
+**GPU-accessible system RAM, sorted by the Shared column**
 
 ![Processes sorted by system-memory usage, alongside the selected process's memory explanation](docs/screenshots/system-memory.png)
 
@@ -476,7 +479,7 @@ uv run --locked gputaskman --help
 | Key | Action |
 |---|---|
 | Up / Down | Select a process and inspect it |
-| `s` | Cycle sort: VRAM, GPU%, spill, paged, name (then RAM, CPU% unless `--no-system`) |
+| `s` | Cycle sort: VRAM, GPU%, shared system memory, paged, name (then RAM, CPU% unless `--no-system`) |
 | `c` | Cycle all charts or a single metric (also available in the **Charts** dropdown) |
 | `a` | Switch between top and all collected processes |
 | `m` | Toggle full diagnostics / slim monitoring |

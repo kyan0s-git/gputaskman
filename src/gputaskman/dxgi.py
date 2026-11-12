@@ -35,6 +35,7 @@ VENDOR_NVIDIA = 0x10DE
 VENDOR_AMD = 0x1002
 VENDOR_INTEL = 0x8086
 VENDOR_HUAWEI = 0x19E5  # Ascend NPUs (telemetry via npu-smi, not DRM)
+_INTEL_INTEGRATED_MAX_DEDICATED = 512 << 20
 VENDORS = {0x10DE: "NVIDIA", 0x1002: "AMD", VENDOR_INTEL: "Intel", 0x19E5: "Ascend",
            0x1414: "Microsoft", 0x5143: "Qualcomm"}
 
@@ -60,6 +61,12 @@ class Adapter:
         if self.root_display:
             return "ROOT display adapter"
         return VENDORS.get(self.vendor_id, hex(self.vendor_id))
+
+    @property
+    def integrated_intel(self) -> bool:
+        return (self.vendor_id == VENDOR_INTEL
+                and self.dedicated_vram <= _INTEL_INTEGRATED_MAX_DEDICATED
+                and self.shared_system > self.dedicated_vram)
 
 
 def _vcall(obj: ctypes.c_void_p, index: int, restype, *argtypes):
