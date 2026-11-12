@@ -548,13 +548,34 @@ display adapters), or hardware adapters on other platforms, with their vendor an
 one of these adapters: NVIDIA adapters are listed first, followed by other vendors, with each
 group ordered by dedicated memory. An out-of-range
 index is rejected rather than silently selecting another device. Compute-only devices such as an
-NPU are not graphics adapters. AMD and NVIDIA hardware coverage is described below; configurations
+NPU are not graphics adapters and are not listed; an NVIDIA GPU in TCC mode is the exception
+(below). AMD and NVIDIA hardware coverage is described below; configurations
 with multiple GPUs and mixed vendors need further hardware validation. `--once` and `--json`
 still default to GPU 0; use `--gpu N` to collect another device without changing the snapshot format.
 Device telemetry is matched to WDDM adapters by PCI location, not display name or enumeration order.
 If a unique match cannot be established, telemetry is unavailable; buffer logs can still span devices,
 so model-buffer attribution across GPUs is not yet reliable. This conservative matching also applies
 to NVIDIA and may suppress telemetry when Windows does not expose a usable PCI address.
+
+An NVIDIA GPU in **TCC** mode (a datacenter card, or a mining card such as the P102-100) has no
+display driver, so Windows lists no adapter for it and publishes no GPU counters. On Windows,
+gputaskman asks NVML, once when it starts, for TCC devices that DXGI did not list and adds them
+**after** the listed adapters, so no existing GPU number moves. `--list-gpus` marks them
+`TCC compute-only` with their PCI address (including the PCI domain when nonzero), and `--gpu N`
+selects one. Adapter VRAM and each
+process's VRAM come from NVML. NVML documents per-process memory as always unavailable under WDDM
+(Windows manages it, not the NVIDIA driver), so a TCC GPU is where it should be reported; a process
+whose memory the driver does not report is `n/a`, never 0. Engine load, shared memory and commit are
+`n/a`, and no model breakdown is attempted because it needs the shared memory counter too. A TCC GPU
+added or removed while gputaskman runs needs a restart to be noticed. This is covered by mocks, and
+`--list-gpus` reports whether NVML found no TCC GPU or could not complete its probe; raw driver
+exception details are not printed. To validate a real TCC card, run `gputaskman --list-gpus`, then
+`gputaskman --once --gpu N` for the TCC index and compare device and per-process VRAM with
+`nvidia-smi` under the same workload. Record the GPU, driver and workload. The same code path was run
+against a WDDM GPU (RTX 4080 SUPER, NVIDIA 630.20: adapter VRAM matched
+`nvidia-smi` to the MiB with and without a 1 GiB CUDA allocation, and every per-process number stayed
+`n/a`, as NVML documents for WDDM). It is **not validated on TCC hardware**, so per-process VRAM on a
+real TCC card is expected, not confirmed.
 
 On Windows, each exact DXGI LUID is also resolved through `DisplayConfigGetDeviceInfo` to its
 PnP device interface, including inactive displays, then read through SetupAPI. A `ROOT\DISPLAY`
@@ -734,7 +755,7 @@ but a runtime DLL or filename alone does not prove which allocation contains whi
 | Question | Evidence | Confidence / limitation |
 |---|---|---|
 | How full and busy is the card? | WDDM adapter counters and NVML or AMD ADL/SMI | Measured; driver support varies by metric |
-| Which process uses GPU memory? | WDDM process counters; NVML on Linux | Measured accounting, not a resource ownership graph |
+| Which process uses GPU memory? | WDDM process counters; NVML on Linux and for TCC GPUs | Measured accounting, not a resource ownership graph |
 | Which WSL process uses GPU memory? | Windows host counters for `vmwp.exe`, matched to Linux processes | Exact VM total; per-process owner inferred (`*`) or guessed (`?`) |
 | Which engines are active? | WDDM engine counters | CUDA can appear on the **3D** engine |
 | Which runtime is loaded? | Mapped DLL names | Detection, not proof that every library is doing GPU work |
@@ -907,6 +928,7 @@ Identification is designed to stay cheap. Measured on one Windows machine:
 | Process list, command line, listening ports | under 1 ms | Once per process / every 5 s |
 | Windows adapter discovery (DXGI + exact-LUID PnP identity + PCI location, no telemetry sample) | ~0.86 ms median, 2.60 ms max in 30 warm reads, 26.1 ms first/cold call (Windows 11 build 28000, RTX Spark N1X, driver 32.0.16.2114); same machine without the PnP probe: ~0.36 ms median | Once at startup; TUI rediscovery every 5 s. PnP uses fixed buffers, one interface lookup per adapter and at most two name-property reads, no path/device enumeration or retries. Synchronous OS calls are not a hard latency bound. Other drivers, virtual displays and multi-GPU laptops unmeasured; provider reconstruction has additional driver-dependent cost |
 | Windows NVML handle reacquisition (no telemetry sample) | ~8.7 ms median, 9.3 ms max in 30 reads (Windows 11 build 26340, RTX 4080 SUPER, NVIDIA 630.20) | Every 5 s per active collector; retries initialization after NVML session-loss errors. Other drivers unmeasured |
+| Windows TCC discovery (NVML init, device count, one driver-model read per GPU, shutdown) | First call in 15 fresh processes on the same machine, one WDDM GPU: median 37.6 ms, 27.8-43.8 ms. About 15 ms of that is the first `nvmlInit` (it loads `nvml.dll`), which NVML readings pay anyway; the added cost is one extra init-to-shutdown cycle, median 20.7 ms (13.3-30.3 ms). Later calls are cached (about 3 µs). A TCC GPU adds PCI, name and memory reads, which are unmeasured (no TCC hardware here) | Once per process on Windows, including `--list-gpus`; never repeated while running |
 | Memory-map scan (DLLs + mapped files) | 1-50 ms per process | New processes, a 64 MiB / 10% memory change, or every 2 min; at most 150 ms per refresh |
 | Model-path argument fallback | 0.14 ms median / 0.20 ms max for 256 non-model arguments; 5.51 / 6.58 ms for 16 local GGUF paths; 0.18 / 0.62 ms for 16 missing paths (30 warm reads, Windows 11 build 26340, x64, Python 3.13.17; synthetic files, no GPU workload). First 16-file call: 7.74 ms | Same cached scan cadence as memory maps; at most 256 tokens and 16 candidate paths, no directory walk or full GGUF headers. Counts bound work, not synchronous filesystem latency; other platforms and network filesystems unmeasured |
 | GGUF header, model-store manifests | ms, cached | Once per file / every 60 s |
@@ -1073,6 +1095,7 @@ downloads are bundled in this repository.
 | `wslhost.py` | WSL: interop check, Windows host counter stream, adapter pairing, context matching |
 | `macos.py` | macOS backend: IOKit device stats and per-process GPU time, `footprint` GPU memory poller, libproc memory maps |
 | `nvml.py` | NVIDIA device readings |
+| `tcc.py` | NVIDIA TCC-mode GPUs on Windows: finds the ones DXGI does not list, and reads their VRAM and per-process VRAM from NVML |
 | `adl.py`, `amdsmi.py` | Optional AMD device readings |
 | `procinfo.py` | Runtime, mapped-file, and process discovery |
 | `stores.py` | Friendly names from Ollama, LM Studio, and Hugging Face model stores |
@@ -1089,6 +1112,8 @@ downloads are bundled in this repository.
 - Model identity for non-GGUF runtimes (ONNX Runtime, PyTorch, TensorRT) beyond installed candidates.
 - Explicit provenance and availability for every counter and estimate.
 - Reliable multi-GPU matching and per-device model placement.
+- NVIDIA TCC-mode GPUs: validation on TCC hardware, then per-process load and model breakdowns, which
+  the Windows counters would supply for a WDDM GPU.
 - Intel `xe` per-process memory and load (`drm-cycles-*`), the Intel GT clock in the device panel, and Intel
   validation beyond the Arc A770 / UHD 730 pair.
 - macOS: a portable build, Ollama/llama.cpp/MLX validation, and compressed GPU memory (footprint's

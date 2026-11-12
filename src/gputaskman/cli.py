@@ -108,11 +108,21 @@ def main() -> None:
 
     if args.list_gpus:
         from .collector import enumerate_adapters, ordered_adapters
+        from .tcc import TccAdapter, tcc_discovery_status
 
         for i, adapter in enumerate(ordered_adapters(enumerate_adapters())):
-            print(f"{i}: {adapter.name} ({adapter.vendor}, LUID 0x{adapter.luid & 0xffffffffffffffff:016x})")
+            if isinstance(adapter, TccAdapter):  # its LUID is made up from the PCI identity, so show the address
+                bus, device, function = adapter.pci_address
+                pci = f"{adapter.pci_domain:08x}:" if adapter.pci_domain else ""
+                print(f"{i}: {adapter.name} ({adapter.vendor}, TCC compute-only, "
+                      f"PCI {pci}{bus:02x}:{device:02x}.{function:x})")
+            else:
+                print(f"{i}: {adapter.name} ({adapter.vendor}, LUID 0x{adapter.luid & 0xffffffffffffffff:016x})")
             if adapter.identity_status:
                 print(f"   {adapter.identity_status}")
+        status = tcc_discovery_status()
+        if status:
+            print(f"TCC discovery: {status}", file=sys.stderr)
         return
 
     _check_gpu(ap, args.gpu)

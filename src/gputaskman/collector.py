@@ -19,13 +19,19 @@ from . import nvml as nvml_mod
 from .nvml import Nvml, NvDevice
 from .pdh import ProcGpu
 from .procinfo import AI_KINDS, ProcDetail, ProcInspector, classify
+from .tcc import TccAdapter, TccCounters, tcc_adapters
 from .telemetry import DeviceTelemetry
 
 if sys.platform == "win32":
-    from .dxgi import enumerate_adapters
+    from . import dxgi
     from .pdh import GpuCounters
 
     BACKEND = "wddm"
+
+    def enumerate_adapters(*, strict: bool = False) -> list[Adapter]:
+        """DXGI's adapters plus the TCC-mode NVIDIA GPUs it does not list."""
+        listed = dxgi.enumerate_adapters(strict=strict)  # a strict DXGI failure raises before NVML is asked
+        return listed + tcc_adapters(listed)
 elif sys.platform == "darwin":
     from .macos import MacCounters as GpuCounters
     from .macos import enumerate_adapters, macos_version
@@ -162,9 +168,10 @@ def select_adapter(adapters: list[Adapter], gpu_index: int) -> Adapter | None:
 
 
 def ordered_adapters(adapters: list[Adapter]) -> list[Adapter]:
-    """List all hardware adapters; retain NVIDIA-first ordering for existing users."""
+    """List all hardware adapters; retain NVIDIA-first ordering for existing users. TCC GPUs come last, so
+    adding one never changes the index of a GPU that Windows lists."""
     return sorted((a for a in adapters if not a.software),
-                  key=lambda a: (a.vendor_id != VENDOR_NVIDIA, -a.dedicated_vram, a.luid))
+                  key=lambda a: (isinstance(a, TccAdapter), a.vendor_id != VENDOR_NVIDIA, -a.dedicated_vram, a.luid))
 
 
 def select_nv_device(adapter: Adapter | None, devices: list[NvDevice], gpu_index: int,
@@ -175,6 +182,9 @@ def select_nv_device(adapter: Adapter | None, devices: list[NvDevice], gpu_index
         if sys.platform != "win32":
             from .linux import pci_key
             matches = [d for d in devices if d.pci_bus and pci_key(d.pci_bus) == adapter.luid]
+            return matches[0] if len(matches) == 1 else None
+        if isinstance(adapter, TccAdapter):
+            matches = [d for d in devices if adapter.matches_pci(d.pci_bus) and d.driver_model == "TCC"]
             return matches[0] if len(matches) == 1 else None
         if adapter.pci_address is None:
             return None
@@ -218,10 +228,16 @@ class Collector:
         self.adapters = [a for a in (enumerate_adapters() if adapters is None else adapters) if not a.software]
         self.adapter = select_adapter(self.adapters, gpu_index)
         with ExitStack() as resources:
-            self.counters = GpuCounters()
-            resources.callback(self.counters.close)
-            self.nvml = Nvml()
-            resources.callback(self.nvml.close)
+            if isinstance(self.adapter, TccAdapter):  # no Windows counters exist for it: NVML is the source
+                self.nvml = Nvml()
+                resources.callback(self.nvml.close)
+                self.counters = TccCounters(self.adapter, self.nvml)
+                resources.callback(self.counters.close)
+            else:
+                self.counters = GpuCounters()
+                resources.callback(self.counters.close)
+                self.nvml = Nvml()
+                resources.callback(self.nvml.close)
             self.amdsmi = AmdSmi(self.adapter, self.adapters)
             resources.callback(self.amdsmi.close)
             self.adl = Adl(self.adapter, self.adapters)
@@ -362,7 +378,13 @@ class Collector:
         snap.host_status = self.host_status
         if BACKEND == "wddm" and self.adapter:
             snap.counter_adapter_matched = luid in per_luid or luid in adapters
-            if not snap.counter_adapter_matched:
+            if isinstance(self.adapter, TccAdapter):
+                snap.counter_status = (
+                    "TCC compute-only GPU: Windows publishes no GPU counters for it, so VRAM and processes come "
+                    "from NVML. Per-process engine load, shared memory and commit are n/a, and per-process VRAM "
+                    "is n/a when the driver does not report it." if snap.counter_adapter_matched else
+                    "NVML could not read this TCC GPU; VRAM and processes are unavailable.")
+            elif not snap.counter_adapter_matched:
                 snap.counter_status = ("Windows GPU counters could not be matched to the selected adapter; "
                                        "VRAM and processes are unavailable. The adapter may be temporarily "
                                        "unavailable, or GPU-PV VMs may not expose these counters.")
