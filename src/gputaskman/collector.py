@@ -353,12 +353,15 @@ class Collector:
         procs = per_luid.get(luid, {})
         a = adapters.get(luid)
         integrated_gpu = BACKEND == "wddm" and self.adapter is not None and self.adapter.integrated_gpu
+        integrated_local_pids = {
+            pid for pid, gpu in procs.items()
+            if integrated_gpu and "dedicated" in gpu.available and gpu.dedicated >= MiB
+        }
         if integrated_gpu:
             for gpu in procs.values():
                 if "dedicated" in gpu.available and gpu.dedicated > 0:
                     gpu.shared += gpu.dedicated
                     gpu.dedicated = 0
-                    gpu.available.add("shared")
         if BACKEND == "metal":
             nv = self.counters.device  # IOKit's device stats in the shape the header renders (no NVML on macOS)
         elif self.drm_card is not None:
@@ -429,7 +432,7 @@ class Collector:
         elif self.backend == "ascend":
             snap.process_memory_available = False
             snap.counter_status = "Ascend chip unavailable: npu-smi could not match the selected adapter"
-        live = [(pid, g) for pid, g in procs.items() if _is_live(g)]
+        live = [(pid, g) for pid, g in procs.items() if _is_live(g) or pid in integrated_local_pids]
         live.sort(key=lambda x: -(x[1].shown_vram or 0))
         for pid, g in live:
             d = self.inspector.get(pid)
