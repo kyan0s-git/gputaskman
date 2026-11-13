@@ -1,4 +1,5 @@
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -52,6 +53,7 @@ class LinuxSensorTests(unittest.TestCase):
         self.assertAlmostEqual(by[("amdgpu", "freq1")].value, 2500)
         self.assertTrue(all(s.source == "hwmon" for s in reading.sensors))
 
+    @unittest.skipIf(sys.platform == "win32", "RAPL zone names contain ':', which Windows paths cannot")
     def test_rapl_power_is_a_rate_and_survives_wraparound(self):
         zone = self.rapl / "intel-rapl:0"
         write(zone, {"name": "package-0", "energy_uj": 1_000_000, "max_energy_range_uj": 10_000_000})
@@ -69,6 +71,7 @@ class LinuxSensorTests(unittest.TestCase):
         self.assertAlmostEqual(package(third).value, 1.0)
         self.assertEqual(package(second).name, "Package power")
 
+    @unittest.skipIf(sys.platform == "win32", "RAPL zone names contain ':', which Windows paths cannot")
     def test_rapl_permission_is_explained(self):
         write(self.rapl / "intel-rapl:0", {"name": "package-0"})
         with mock.patch.object(Path, "read_text", side_effect=PermissionError), \
