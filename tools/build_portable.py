@@ -1,4 +1,4 @@
-"""Build a native console executable (Windows or Linux) and archive its complete runtime."""
+"""Build a native console executable (Windows or Linux), archive its runtime, and optionally wrap it in a Windows installer."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import subprocess
 import sys
 import sysconfig
 import tarfile
+import os
 import tempfile
 import tomllib
 import zipfile
@@ -131,6 +132,38 @@ def create_archive(bundle: Path, output: Path, version: str, arch: str) -> Path:
     return archive
 
 
+def find_iscc() -> Path:
+    """Locate the Inno Setup compiler (preinstalled on GitHub's Windows runners)."""
+    found = shutil.which("iscc")
+    candidates = [Path(found)] if found else []
+    for variable in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"):
+        base = os.environ.get(variable)
+        if base:
+            candidates += [Path(base) / "Inno Setup 6" / "ISCC.exe", Path(base) / "Programs" / "Inno Setup 6" / "ISCC.exe"]
+    for path in candidates:
+        if path.is_file():
+            return path
+    raise RuntimeError("Inno Setup compiler (ISCC.exe) not found; install it with: winget install JRSoftware.InnoSetup")
+
+
+def create_installer(bundle: Path, output: Path, version: str, arch: str) -> Path:
+    """Wrap the verified bundle in a setup program. The same checks as the ZIP run first."""
+    validate_version(version)
+    check_executable(bundle / "gputaskman.exe", arch)
+    _bundle_files(bundle)
+    output.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [str(find_iscc()), "/Qp", f"/DAppVersion={version}", f"/DArch={arch}",
+         f"/DSourceDir={bundle}", f"/DOutputDir={output}", str(ROOT / "tools" / "installer.iss")],
+        check=True,
+    )
+    installer = output / f"gputaskman-{version}-windows-{arch}-setup.exe"
+    if not installer.is_file():
+        raise RuntimeError(f"Inno Setup did not produce {installer}")
+    _checksum(installer)
+    return installer
+
+
 def nvidia_license(source: str) -> str:
     header, boundary, _ = source.partition("\n#####\n")
     if not boundary or "Redistribution and use" not in header or "Copyright" not in header:
@@ -202,10 +235,12 @@ Documentation: https://github.com/shanselman/gputaskman
 """
 
 
-def build(output: Path, arch: str, tag: str | None = None) -> Path:
+def build(output: Path, arch: str, tag: str | None = None, installer: bool = False) -> Path:
     system, actual = target(sysconfig.get_platform())
     if actual != arch:
         raise ValueError(f"Requested {arch}, but this Python interpreter is {actual}")
+    if installer and system != "windows":
+        raise ValueError("The installer is built on Windows only")
     version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
     validate_version(version, tag)
     with tempfile.TemporaryDirectory(prefix=f"gputaskman-{arch}-") as temporary:
@@ -239,7 +274,10 @@ def build(output: Path, arch: str, tag: str | None = None) -> Path:
             "Documentation: https://github.com/shanselman/gputaskman\n",
             encoding="utf-8",
         )
-        return create_archive(bundle, output, version, arch)
+        archive = create_archive(bundle, output, version, arch)
+        if installer:
+            create_installer(bundle, output, version, arch)
+        return archive
 
 
 def main() -> None:
@@ -247,8 +285,10 @@ def main() -> None:
     parser.add_argument("--arch", choices=MACHINES, required=True)
     parser.add_argument("--output", type=Path, default=ROOT / "dist")
     parser.add_argument("--tag", help="Require a release tag matching the package version")
+    parser.add_argument("--installer", action="store_true",
+                        help="Windows only: also build the Inno Setup installer beside the ZIP")
     args = parser.parse_args()
-    print(build(args.output.resolve(), args.arch, args.tag))
+    print(build(args.output.resolve(), args.arch, args.tag, args.installer))
 
 
 if __name__ == "__main__":

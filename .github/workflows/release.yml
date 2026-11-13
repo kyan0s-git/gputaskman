@@ -28,12 +28,21 @@ jobs:
           python-version: "3.13"
       - run: uv sync --locked --group release
       - run: uv run --locked python -m unittest discover -s tests -v
-      - name: Build portable ZIP
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and
+              -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe") -and
+              -not (Test-Path "$env:ProgramFiles\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "Inno Setup install failed" }
+          }
+      - name: Build portable ZIP and installer
         shell: pwsh
         env:
           BUILD_ARCH: ${{ matrix.arch }}
         run: |
-          $buildArgs = @("--arch", $env:BUILD_ARCH)
+          $buildArgs = @("--arch", $env:BUILD_ARCH, "--installer")
           if ($env:GITHUB_REF_TYPE -eq "tag") {
             $buildArgs += @("--tag", $env:GITHUB_REF_NAME)
           }
@@ -56,12 +65,35 @@ jobs:
           } finally {
             Pop-Location
           }
+      - name: Smoke-test the installer (silent per-user install, run, uninstall)
+        shell: pwsh
+        run: |
+          $setup = Get-Item dist\*-setup.exe
+          $target = Join-Path $env:RUNNER_TEMP "installed app"
+          $log = Join-Path $env:RUNNER_TEMP "setup.log"
+          $p = Start-Process -FilePath $setup.FullName -Wait -PassThru -ArgumentList @(
+            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/TASKS=addtopath",
+            "/DIR=`"$target`"", "/LOG=`"$log`"")
+          if ($p.ExitCode -ne 0) { Get-Content $log; throw "Installer failed: $($p.ExitCode)" }
+          foreach ($name in "gputaskman.exe", "gtm.exe") {
+            $exe = Join-Path $target $name
+            if (-not (Test-Path $exe)) { throw "$name was not installed" }
+            $env:PYTHONPATH = ""; $env:PYTHONHOME = ""
+            & $exe --help
+            if ($LASTEXITCODE -ne 0) { throw "$name failed after install" }
+          }
+          $uninstaller = Get-ChildItem $target -Filter "unins*.exe" | Select-Object -First 1
+          $p = Start-Process -FilePath $uninstaller.FullName -Wait -PassThru -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+          if ($p.ExitCode -ne 0) { throw "Uninstaller failed: $($p.ExitCode)" }
+          if (Test-Path (Join-Path $target "gputaskman.exe")) { throw "Uninstall left gputaskman.exe behind" }
       - uses: actions/upload-artifact@v4
         with:
           name: windows-${{ matrix.arch }}-portable
           path: |
             dist/*.zip
             dist/*.zip.sha256
+            dist/*-setup.exe
+            dist/*-setup.exe.sha256
           if-no-files-found: error
 
   build-linux:

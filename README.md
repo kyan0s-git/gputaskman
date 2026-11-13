@@ -44,6 +44,20 @@ configuration described below. Both installers keep the app in an isolated envir
 The shorter `gtm` command is also available. Upgrade with `uv tool upgrade gputaskman`
 or `pipx upgrade gputaskman`. For Windows without Python, use the portable download below.
 
+## Windows installer
+
+Each tagged release also publishes `gputaskman-VERSION-windows-x64-setup.exe` (Intel/AMD) and
+`gputaskman-VERSION-windows-arm64-setup.exe` (native ARM64). The installer wraps the same frozen
+build as the portable ZIP, so the interface is unchanged: the full-screen terminal UI. It installs
+per user by default (no administrator prompt; the wizard can switch to all users), adds a Start
+menu entry that opens the monitor in your default terminal (Windows Terminal on Windows 11), a
+one-shot report shortcut, and optionally a desktop shortcut and a PATH entry so `gputaskman` and
+`gtm` work in any terminal. Uninstall from Settings > Apps. Silent install:
+`gputaskman-VERSION-windows-x64-setup.exe /VERYSILENT /CURRENTUSER`.
+It bundles no drivers, and like the ZIP it is **unsigned**, so SmartScreen may warn. The setup
+program and its `.sha256` file are validated by the release workflow (silent install, run, uninstall)
+on hosted runners; it has not been checked on a Windows machine with a GPU.
+
 ## Portable Windows download
 
 The [Releases page](https://github.com/shanselman/gputaskman/releases) is where tagged builds
@@ -62,7 +76,7 @@ or PowerShell in the extracted folder:
 
 No Python, uv, CUDA Toolkit, model download, or installation is needed. A supported GPU with a
 current Windows WDDM driver is required. Builds are currently **unsigned**; code signing
-and an installer are not part of this initial distribution. Each ZIP includes licenses and a
+is not part of this distribution. Each ZIP includes licenses and a
 `.zip.sha256` companion file is published for integrity checks.
 
 ## Clone and run
@@ -1059,6 +1073,9 @@ The builder verifies the interpreter and executable architectures, includes Text
 and dependency licenses, and writes the complete portable ZIP and SHA-256 file to `dist`.
 It does not bundle Windows or GPU driver DLLs, inference servers, or models. Keep uv for development;
 the executable ZIP is for running the monitor without a Python environment.
+
+Add `--installer` on Windows to also build the Inno Setup installer (`tools/installer.iss`;
+needs [Inno Setup 6](https://jrsoftware.org/isinfo.php), `winget install JRSoftware.InnoSetup`).
 
 The **Portable release** GitHub Actions workflow builds on `windows-2022` (x64), `windows-11-arm`
 (ARM64), `ubuntu-22.04` (Linux x64), and `ubuntu-22.04-arm` (Linux ARM64). Linux builds use the

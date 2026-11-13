@@ -9,6 +9,9 @@ import os
 import stat
 import tarfile
 
+from unittest import mock
+
+from tools import build_portable
 from tools.build_portable import (architecture, check_elf, check_executable, create_archive, create_linux_archive,
                                   nvidia_license, target, validate_version)
 
@@ -141,6 +144,44 @@ class LinuxPortableTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "must not be distributed"):
                     create_linux_archive(root, root / "output", "0.1.0", "x64")
                 os.remove(root / lib)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class InstallerTests(unittest.TestCase):
+    def test_installer_runs_iscc_with_bundle_and_writes_checksum(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundle, out = root / "bundle", root / "out"
+            bundle.mkdir()
+            exe = bundle / "gputaskman.exe"
+            header = bytearray(64)
+            header[:2] = b"MZ"
+            struct.pack_into("<I", header, 60, 64)
+            exe.write_bytes(header + b"PE\0\0" + struct.pack("<H", 0x8664))
+
+            def fake_run(cmd, check):
+                self.assertIn("/DAppVersion=1.2.3", cmd)
+                self.assertIn("/DArch=x64", cmd)
+                (out / "gputaskman-1.2.3-windows-x64-setup.exe").write_bytes(b"setup")
+
+            with mock.patch.object(build_portable, "find_iscc", return_value=Path("ISCC.exe")), \
+                    mock.patch.object(build_portable.subprocess, "run", fake_run):
+                installer = build_portable.create_installer(bundle, out, "1.2.3", "x64")
+            self.assertTrue(Path(f"{installer}.sha256").read_text().startswith(hashlib.sha256(b"setup").hexdigest()))
+
+    def test_installer_rejects_driver_dlls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            header = bytearray(64)
+            header[:2] = b"MZ"
+            struct.pack_into("<I", header, 60, 64)
+            (bundle / "gputaskman.exe").write_bytes(header + b"PE\0\0" + struct.pack("<H", 0x8664))
+            (bundle / "nvml.dll").write_bytes(b"x")
+            with self.assertRaises(ValueError):
+                build_portable.create_installer(bundle, bundle / "out", "1.2.3", "x64")
 
 
 if __name__ == "__main__":

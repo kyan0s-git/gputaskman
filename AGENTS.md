@@ -121,8 +121,9 @@ uv run --locked gputaskman --json
 2. Run the tests, commit `Release vX.Y.Z`, and push `main`.
 3. `git tag -a vX.Y.Z -m "GPU Task Manager vX.Y.Z"` and `git push origin refs/tags/vX.Y.Z`.
 
-`.github/workflows/release.yml` builds Windows x64/ARM64 and Linux x64/ARM64 archives, smoke-tests
-each extracted executable without Python, and publishes them together with checksums and generated
+`.github/workflows/release.yml` builds Windows x64/ARM64 archives plus Inno Setup installers
+(`tools/installer.iss`, via `build_portable.py --installer`) and Linux x64/ARM64 archives, smoke-tests
+each extracted executable without Python (and the installer by silent install/run/uninstall), and publishes them together with checksums and generated
 notes. The build fails if the tag does not match `project.version`. A manual `workflow_dispatch`
 run builds artifacts without publishing.
 
