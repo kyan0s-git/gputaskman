@@ -552,7 +552,7 @@ class GpuTaskManager(App):
         if other > 32 << 20:
             legend.append("■ ", style="grey35")
             legend.append(f"unattributed {gb(other)}  ")
-        if s.vram_used is not None and s.vram_total and not intel_memory_note(s):
+        if s.vram_used is not None and s.vram_total and s.shared_is_spill and not intel_memory_note(s):
             legend.append(f"free {gb(max(s.vram_total - s.vram_used, 0))}", style="grey62")
         if s.shared_used is not None and s.shared_used > 64 << 20:
             legend.append(f"   shared(RAM) {gb(s.shared_used)}", style="yellow")

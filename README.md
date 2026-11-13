@@ -77,13 +77,13 @@ During desktop/browser activity, WDDM reported per-process VRAM and AMD ADL repo
 clocks, and ASIC power; temperature, memory activity, and PCIe readings were unavailable. Vulkan/ROCm
 workloads were not tested on this machine.
 
-Intel adapters on Windows can use WDDM's per-process memory and engine counters. When those counters are
-available, device GPU activity is the busiest WDDM engine after combining its process counters. An Intel
-adapter reporting at most 512 MiB of dedicated memory and more shared system memory is treated as integrated:
-per-process local usage is shown as Shared RAM, not VRAM, while device dedicated and shared counters remain
-separate. This is a DXGI-capacity heuristic. Intel temperature, power, clocks, and memory activity are not
-currently available on Windows. Arc B580 behavior is covered by mocked counters but has not been validated
-on Intel hardware.
+Intel and Qualcomm adapters on Windows can use WDDM's per-process memory and engine counters. When those
+counters are available, device GPU activity is the busiest WDDM engine after combining its process counters.
+An Intel or Qualcomm adapter reporting at most 512 MiB of dedicated memory and more shared system memory is
+treated as integrated: per-process local usage is shown as Shared RAM, not VRAM, while device dedicated and
+shared counters remain separate. This is a DXGI-capacity heuristic. Qualcomm GPU activity uses the WDDM
+adapter counter; temperature, power, clocks, and memory activity are not currently available on Windows.
+Arc B580 behavior is covered by mocked counters but has not been validated on Intel hardware.
 
 Install [Git for Windows](https://git-scm.com/downloads/win) and
 [uv](https://docs.astral.sh/uv/getting-started/installation/) if needed. With WinGet:
@@ -854,8 +854,12 @@ own loaded-model endpoint returned `Phi-3.5-mini-instruct-generic-gpu:2`, matchi
 `foundry model list --loaded --output json` (WebGPU execution provider). gputaskman displayed the
 same ID with `server_source: "process"` and unknown model sizes/context left `null`.
 This was a read-only check of an already-loaded model, not an inference or active-engine test.
-Qualcomm's local-versus-shared process-memory accounting remains unresolved and is unchanged
-by model identification; do not treat these process-local bytes as verified dedicated VRAM.
+The same machine's WDDM adapter counters reported 128 MiB of dedicated capacity, 0 dedicated bytes in use,
+and 48.5 GB of shared system memory while Phi Mini was loaded. The Foundry process's local-usage counter
+is therefore displayed as shared RAM, not added to dedicated VRAM; its bytes are not added again to the
+adapter total. gputaskman and Task Manager both showed the workload's GPU memory use growing, though their
+samples can differ in timing. This memory behavior has been validated only on the Snapdragon X2 Elite;
+other Snapdragon Elite models are not yet validated.
 
 GPU-backed WinML and Studio Effects paths have **not been validated on a Copilot+ PC**. A future
 hardware check should compare idle versus active workload samples, record the actual GPU adapter
