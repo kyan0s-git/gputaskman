@@ -1249,7 +1249,9 @@ a release. A pushed `vVERSION` tag must match `project.version` in `pyproject.to
 pass, the workflow publishes all four archives and checksums together with generated release notes.
 The workflow also builds a Python wheel and source distribution. On tags, after all builds
 succeed, a separate job publishes them to PyPI using Trusted Publishing (GitHub OIDC), with no
-stored API token. Manual runs produce artifacts only and publish neither a GitHub release nor
+stored API token. That job runs only when the repository variable `PUBLISH_TO_PYPI` is `true`
+(Settings > Secrets and variables > Actions > Variables); otherwise it is skipped and the GitHub
+release is published on its own. Manual runs produce artifacts only and publish neither a GitHub release nor
 a PyPI package.
 
 Before the first PyPI publication, configure a pending publisher for project `gputaskman` on

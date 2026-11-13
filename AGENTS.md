@@ -145,7 +145,8 @@ notes. The build fails if the tag does not match `project.version`. A manual `wo
 run builds artifacts without publishing.
 
 The same workflow builds a wheel and source distribution, then publishes them to PyPI after all
-builds succeed on a tag. Trusted Publishing uses GitHub OIDC in the `pypi` environment; no API
+builds succeed on a tag, but only when the repository variable `PUBLISH_TO_PYPI` is `true` (otherwise the job is
+skipped; a fork cannot publish under the upstream project's PyPI name). Trusted Publishing uses GitHub OIDC in the `pypi` environment; no API
 token is stored. The PyPI publisher must match owner `shanselman`, repository `gputaskman`,
 workflow `release.yml`, and environment `pypi`. Only the isolated publishing job has
 `id-token: write`; build jobs must not receive it.

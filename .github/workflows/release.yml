@@ -209,7 +209,10 @@ jobs:
 
   publish-pypi:
     name: Publish to PyPI
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    # Opt-in: set the repository variable PUBLISH_TO_PYPI to "true" once a PyPI Trusted Publisher matches this
+    # repository, workflow and environment. Without it the job is skipped, so a fork (which cannot publish under
+    # the upstream "gputaskman" name) still gets a clean release.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && vars.PUBLISH_TO_PYPI == 'true'
     needs: [build, build-linux, build-python]
     runs-on: ubuntu-latest
     environment:
