@@ -30,6 +30,7 @@ class CpuInfo:
     physical: int | None
     util_pct: float | None              # whole machine, 0-100; None on the first reading
     per_core_pct: list[float | None]
+    per_core_mhz: list[float | None]    # effective clock per logical processor, as the OS reports it ([] when unknown)
     speed_mhz: float | None             # current effective clock as the OS reports it (Task Manager's "Speed")
     base_mhz: float | None
     max_mhz: float | None
@@ -56,6 +57,7 @@ class MemoryInfo:
 @dataclass
 class DiskIO:
     name: str
+    model: str | None
     read_bps: float | None
     write_bps: float | None
     read_bytes: int
@@ -149,6 +151,46 @@ def _linux_threads() -> int | None:
         return None
 
 
+def _linux_core_mhz(n: int) -> list[float | None]:
+    """Each logical CPU's current clock from cpufreq (kHz), or [] when cpufreq is absent (VMs, containers)."""
+    out: list[float | None] = []
+    for i in range(n):
+        try:
+            with open(f"/sys/devices/system/cpu/cpu{i}/cpufreq/scaling_cur_freq", encoding="ascii") as f:
+                out.append(int(f.read().strip()) / 1000)
+        except (OSError, ValueError):
+            out.append(None)
+    return out if any(v is not None for v in out) else []
+
+
+def _disk_model(name: str) -> str | None:
+    if not sys.platform.startswith("linux"):
+        return None
+    for path in (f"/sys/block/{name}/device/model", f"/sys/block/{name}/device/device/model"):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                model = f.read().strip()
+            if model:
+                return model
+        except OSError:
+            continue
+    return None
+
+
+def _win_core_mhz(win: dict, base: float | None, n: int) -> list[float | None]:
+    """Per logical processor: base clock x its % Processor Performance (instances are "group,index")."""
+    if not base:
+        return []
+    out: list[float | None] = [None] * n
+    for name, perf in win.get("perf_each", []):
+        group, _, index = name.partition(",")
+        if group.isdigit() and index.isdigit():
+            i = int(group) * 64 + int(index)
+            if i < n:
+                out[i] = base * perf / 100
+    return out if any(v is not None for v in out) else []
+
+
 def _physical_disks() -> set[str] | None:
     """Linux whole-disk block devices (no partitions, loop or RAM disks); None elsewhere (psutil already lists disks)."""
     if not sys.platform.startswith("linux"):
@@ -164,6 +206,7 @@ class _WinCounters:
 
     PATHS = {
         "perf": r"\Processor Information(_Total)\% Processor Performance",
+        "perf_each": r"\Processor Information(*)\% Processor Performance",
         "idle": r"\PhysicalDisk(*)\% Idle Time",
         "committed": r"\Memory\Committed Bytes",
         "limit": r"\Memory\Commit Limit",
@@ -252,11 +295,16 @@ class HardwareSampler:
         self._last_t: float | None = None
         self._last_cpu = None
         self._last_disk: dict[str, tuple[int, int, int | None]] = {}
+        self._models: dict[str, str | None] = {}
         self._last_net: dict[str, tuple[int, int]] = {}
         self._volumes: list[Volume] = []
         self._volumes_t = 0.0
         self._addrs: dict[str, list[str]] = {}
         self._addrs_t = 0.0
+
+    def reset_stats(self) -> None:
+        if self._sensors is not None:
+            self._sensors.reset_stats()
 
     def close(self) -> None:
         if self._sensors is not None:
@@ -325,7 +373,13 @@ class HardwareSampler:
             uptime = max(0.0, time.time() - psutil.boot_time())
         except OSError:
             uptime = None
-        return CpuInfo(self._model, self._logical, self._physical, util, per_core, speed, base, max_mhz,
+        if sys.platform == "win32":
+            per_mhz = _win_core_mhz(win, base, len(times))
+        elif sys.platform.startswith("linux"):
+            per_mhz = _linux_core_mhz(len(times))
+        else:
+            per_mhz = []
+        return CpuInfo(self._model, self._logical, self._physical, util, per_core, per_mhz, speed, base, max_mhz,
                        tuple(load) if load else None, processes, threads, handles, uptime, note)
 
     def _memory(self, win: dict) -> MemoryInfo:
@@ -371,7 +425,9 @@ class HardwareSampler:
             if pct is None and busy_ms is not None and before and before[2] is not None and dt > 0 and busy_ms >= before[2]:
                 pct = min(100.0, 100.0 * (busy_ms - before[2]) / (dt * 1000))
             seen[name] = (c.read_bytes, c.write_bytes, busy_ms)
-            out.append(DiskIO(name, read_bps, write_bps, c.read_bytes, c.write_bytes, pct))
+            if name not in self._models:
+                self._models[name] = _disk_model(name)
+            out.append(DiskIO(name, self._models[name], read_bps, write_bps, c.read_bytes, c.write_bytes, pct))
         self._last_disk = seen
         return out
 
@@ -457,6 +513,7 @@ def to_dict(h: HardwareSample) -> dict:
         if cpu[key] is not None:
             cpu[key] = round(cpu[key], 1)
     cpu["per_core_pct"] = [round(v, 1) if v is not None else None for v in h.cpu.per_core_pct]
+    cpu["per_core_mhz"] = [round(v) if v is not None else None for v in h.cpu.per_core_mhz]
     if cpu["uptime_s"] is not None:
         cpu["uptime_s"] = int(cpu["uptime_s"])
 
@@ -470,6 +527,7 @@ def to_dict(h: HardwareSample) -> dict:
         "volumes": [asdict(v) for v in h.volumes],
         "network": [rounded(asdict(n)) for n in h.nics],
         "sensors": [s.to_dict() for s in h.sensors.sensors],
+        "drive_health": [d.to_dict() for d in h.sensors.health],
         "sensor_source": h.sensors.source or None,
         "notes": h.notes + h.sensors.notes,
         "cost_ms": round(h.cost_ms, 1),

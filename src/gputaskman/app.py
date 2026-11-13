@@ -141,8 +141,11 @@ it is never GPU bytes and never added to a GPU total. `n/a` means the OS wouldn'
 row seen from WSL); `…` means one more sample is needed. Inside WSL they describe the Linux VM.
 `--no-system` hides them.
 
-**Hardware view** (`h`): CPU, memory, disks, network adapters and hardware sensors (temperatures, fans,
-package power, voltages, clocks), like Task Manager's Performance tab and HWiNFO's sensor list. These are
+**Hardware view** (`h`): a navigation list (Summary, CPU, Memory, GPUs, drives, volumes, network adapters,
+motherboard, battery, all sensors; `Tab` switches between the list and the table) with each component's
+headline numbers, 60 s graphs, and a Now / Min / Avg / Max table for this session (`r` resets), like Task
+Manager's Performance tab and HWiNFO's sensor list. CPU shows per-thread load and effective clocks, Tctl/Tdie,
+TjMax, TDP/PL1 and VID where the platform reports them; drives show S.M.A.R.T. health. These are
 machine readings from the OS and the sensors, never GPU bytes and never added to a GPU total; each sensor row
 names its source (`lhm` LibreHardwareMonitor on Windows, `hwmon`/`rapl` on Linux, `battery`). On Windows, CPU
 temperatures, fans and package power need the PawnIO driver (an installer option) and an elevated
@@ -256,6 +259,7 @@ class GpuTaskManager(App):
         self.hw_error: str | None = None
         self._hw_sampler: HardwareSampler | None = None
         self.hw_history = HardwareHistory()
+        self.render_errors: list[str] = []  # failures the hardware view caught and survived (the self-test reads them)
         self.sorts = self.SORTS + self.SYSTEM_SORTS if system else self.SORTS
         self.host_sample: HostSample | None = None
         self.host_error: str | None = None
@@ -395,6 +399,23 @@ class GpuTaskManager(App):
         self.hw_error = None
         return hw
 
+    def reset_hardware_stats(self) -> None:
+        if self._hw_sampler is not None:
+            self._hw_sampler.reset_stats()
+
+    def _log_render_error(self, error: Exception, where: str) -> None:
+        from . import crashlog
+
+        crashlog.write(error, where)
+        self.render_errors.append(f"{where}: {type(error).__name__}: {error}")
+
+    def _handle_exception(self, error: Exception) -> None:
+        """Anything that would end the app first goes to the crash log, so a closed window leaves its traceback."""
+        from . import crashlog
+
+        self.crash_log = crashlog.write(error, "unhandled exception")
+        super()._handle_exception(error)
+
     def on_unmount(self) -> None:
         if self._hw_sampler is not None:
             self._hw_sampler.close()  # stops the sensor helper
@@ -411,10 +432,17 @@ class GpuTaskManager(App):
         self.host_sample = host  # None after a failed sample: a stale reading is not shown as current
         self.hw_sample = hw
         if hw is not None:
-            self.hw_history.add(hw)
+            try:
+                self.hw_history.add(hw, snapshots)
+            except Exception as error:  # noqa: BLE001 - statistics are extra; they must not stop the GPU view
+                self._log_render_error(error, "hardware history")
             for screen in self.screen_stack:
                 if isinstance(screen, HardwareScreen):
                     screen.show(hw)
+        if not snapshots:  # no GPU listed right now (none present, or all gone): keep RAM/CPU and hardware live
+            self.snapshots = []
+            self._render_no_gpu()
+            return
         self.hist_cpu.append(host.cpu_pct if host else None)
         self.hist_ram.append(100 * host.ram_used / host.ram_total if host and host.ram_total else None)
         for snap in snapshots:
@@ -478,7 +506,20 @@ class GpuTaskManager(App):
         self.hist_vram.append(100 * snap.vram_used / snap.vram_total
                               if snap.vram_total and snap.vram_used is not None else None)
 
+    def _render_no_gpu(self) -> None:
+        device = self.query_one("#device", Static)
+        device.border_title = "No GPU"
+        device.update(Text("No GPU adapter is listed right now. RAM/CPU (below) and the hardware view (h) keep "
+                           "updating; GPU readings return when an adapter is found.", style="yellow"))
+        if self.system:
+            system = self.query_one("#system", Static)
+            if self.host_sample:
+                system.update(self.render_system(self.host_sample))
+
     def render_dashboard(self) -> None:
+        if not self.snapshots:
+            self._render_no_gpu()
+            return
         amd = bool(self.snapshots[0].adapter and self.snapshots[0].adapter.vendor_id == 0x1002)
         clock_label = "SM/GFX clock" if len(self.snapshots) > 1 else "GFX clock" if amd else "SM clock"
         if getattr(self, "_clock_label", None) != clock_label:
@@ -540,7 +581,11 @@ class GpuTaskManager(App):
         cpu = line("CPU  ")
         cpu.append_text(stacked_bar([(h.cpu_pct, "green3")], 100, width))
         cpu.append_text(cpu_tail)
-        sensors = sensor_summary(self.hw_sample) if self.hw_sample else None
+        try:
+            sensors = sensor_summary(self.hw_sample) if self.hw_sample else None
+        except Exception as error:  # noqa: BLE001 - the sensor line is extra
+            self._log_render_error(error, "System panel sensor line")
+            sensors = None
         if self.monitoring:
             return Group(ram, cpu, *([sensors] if sensors else []))
         cores = line("     ")

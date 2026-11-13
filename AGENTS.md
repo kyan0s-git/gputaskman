@@ -70,7 +70,9 @@ cli.py ──► Collector.sample()  (collector.py)
          ──► Snapshot ──► app.py (Textual TUI) / report.py (text and JSON)
 cli.py ──► HostSampler.sample()  (host.py: system RAM/CPU, OS-reported; sampled beside the Collector, not in Snapshot)
 cli.py ──► HardwareSampler.sample()  (machine.py: CPU, memory, disks, volumes, network; sensors.py: lhm helper / hwmon / RAPL / battery)
-            └─ TUI: hwview.py HardwareScreen (h); --once/--json only with --hardware ("hardware" key)
+            └─ TUI: hwview.py HardwareScreen (h): Model builds pages/rows (pure), the screen draws them and never raises;
+               --once/--json only with --hardware ("hardware" key)
+cli.py selftest ──► stress.py (headless real + seeded fuzz run of the TUI); crashlog.py (local traceback log)
 cli.py update / --check-update ──► update.py (GitHub releases, SHA-256-verified installer); updateview.py (u)
 GPU Task Manager.exe ──► launcher.py ──► conhost.exe gputaskman.exe --window (window.py: title, icon, font, size)
 cli.py diff ──► diff.py: compares two saved --json snapshots (no collection)
@@ -99,7 +101,7 @@ identify everything immediately; the TUI spreads scans across refreshes.
 | Change system RAM/CPU | `host.py` | Machine memory and load as the OS reports them: never GPU bytes, never added to `Snapshot.attributed`, and `diff` ignores it. Unknown is `None`/`null` and a failure carries a reason, never zeros. The JSON key is `system` because `host` already means the WSL Windows host. Windows uses the NT process list (psutil per process takes about 6 s per pass for 1,000 processes), checked against psutil at startup; CPU rates are keyed by `(pid, create_time)` so a reused PID never inherits another process's history (on the psutil path, `is_running()` is what makes psutil drop its cached object for a reused PID; keep that call) |
 | Change WSL matching | `wslhost.py` `ContextTracker` | Keep `tests/test_wslhost.py` replays passing; they are measured sequences |
 | Change TCC support | `tcc.py`, the win32 `enumerate_adapters` wrapper in `collector.py` | NVML only, never a PDH query (Windows publishes no counters for a TCC GPU). NVML is asked once per process; TCC GPUs are paired to DXGI only when the domainless address is unambiguous (PCI domain 0), while the full domain stays in TCC identity and its synthetic LUID. Append after listed adapters so no existing GPU index moves. A process whose memory NVML hides is `n/a` with `attributed` unknown, never 0. No model breakdown (it needs the shared counter). `--list-gpus` distinguishes a successful empty probe from a failed/incomplete probe. Keep `tests/test_tcc.py` passing; mocks do not validate TCC hardware |
-| Change hardware telemetry | `machine.py`, `sensors.py`, `hwview.py` | Machine readings, never GPU bytes and never in `Snapshot.attributed`; `diff` ignores them. Every sensor names its `source`. Rates are `None` on the first reading. `psutil.cpu_percent` keeps module-global state that `host.py` relies on: compute CPU load from `cpu_times` deltas instead. Never touch optical or network volumes. Keep `tests/test_hardware.py` passing |
+| Change hardware telemetry | `machine.py`, `sensors.py`, `hwview.py` | Machine readings, never GPU bytes and never in `Snapshot.attributed`; `diff` ignores them. Every sensor names its `source`; derived values (TjMax from distance-to-TjMax) say so; anything tied to a device by name only is listed separately when the name is ambiguous. Rates are `None` on the first reading; NaN and infinities are `None`. Page building lives in `hwview.Model` (no widgets) so it can be fuzzed; DataTable row keys are indexes, never sensor ids. Run `gputaskman selftest` after a change and add a seeded case to `tests/test_stress.py` for any crash it finds. `psutil.cpu_percent` keeps module-global state that `host.py` relies on: compute CPU load from `cpu_times` deltas instead. Never touch optical or network volumes. Keep `tests/test_hardware.py` passing |
 | Change the Windows sensor helper | `tools/sensors` (C#, .NET Framework 4.7.2) | Read-only; prints one JSON line per reading, `null` for unknown; exits when stdin closes. LibreHardwareMonitorLib version is pinned in the `.csproj`. Built by the release workflow with `dotnet publish -r win-<arch>` and copied in with `build_portable.py --sensors` |
 | Change updates | `update.py`, `updateview.py`, `tools/installer.iss` (`/RELAUNCH`) | Only on request; HTTPS only; refuse to install without a matching `.sha256`. `REPO` names the release source |
 | Change recording | `record.py`, `cli.py` `record_main` | Every line must equal the `--json` object (`report.to_json_dict`, which `dump()` also uses), so unknown stays `null` and nothing is added or summed. Append only, one compact line per sample, flushed as it is written: Ctrl+C or a kill keeps every finished sample, and an interrupted sample writes nothing. Sample the way the TUI does (budgeted scanning, `LiveCollectors` on Windows so a GPU disable/re-enable is recorded as unavailable with a reason); never add a probe, `scan_budget=None`, or `psutil.open_files()` |
@@ -111,6 +113,7 @@ uv sync --locked
 uv run --locked python -m unittest discover -s tests -q
 uv run --locked gputaskman --once
 uv run --locked gputaskman --json
+uv run --locked gputaskman selftest --seconds 30
 ```
 
 - Tests are hardware-independent (mocks and replayed measurements). CI runs them on Windows, Ubuntu,

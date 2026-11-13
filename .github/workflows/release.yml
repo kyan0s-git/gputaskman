@@ -87,6 +87,9 @@ jobs:
             $json = & $exe --json --hardware | ConvertFrom-Json
             if (-not $json.hardware.cpu) { throw "--json --hardware has no hardware section" }
             Write-Host "Hardware: $($json.hardware.cpu.model); sensors=$($json.hardware.sensors.Count); notes=$($json.hardware.notes -join ' | ')"
+            # Stress the TUI headless on this runner's real readings (sensor helper included) and on fuzzed ones.
+            & $exe selftest --seconds 30
+            if ($LASTEXITCODE -ne 0) { throw "selftest failed (portable, no PawnIO)" }
           } finally {
             Pop-Location
           }
@@ -105,7 +108,10 @@ jobs:
           # Sensors after the driver install (hosted runners are VMs: few sensors, but nothing may crash).
           $json = & (Join-Path $target "gputaskman.exe") --json --hardware | ConvertFrom-Json
           if (-not $json.hardware.cpu) { throw "--json --hardware has no hardware section after install" }
-          Write-Host "Installed sensors=$($json.hardware.sensors.Count); notes=$($json.hardware.notes -join ' | ')"
+          Write-Host "Installed sensors=$($json.hardware.sensors.Count); drives=$($json.hardware.drive_health.Count); notes=$($json.hardware.notes -join ' | ')"
+          # The same stress run with PawnIO installed and elevated: LibreHardwareMonitor's full output on every page.
+          & (Join-Path $target "gputaskman.exe") selftest --seconds 40
+          if ($LASTEXITCODE -ne 0) { throw "selftest failed (installed, PawnIO)" }
           # The windowed launcher must start the TUI (in its own conhost window) and keep it running.
           Start-Process -FilePath (Join-Path $target "GPU Task Manager.exe")
           Start-Sleep -Seconds 8
@@ -169,6 +175,7 @@ jobs:
           exe="$(find "$portable" -name gputaskman -type f -perm -u+x)"
           cd "$portable"
           env -i HOME="$HOME" PATH=/usr/bin:/bin "$exe" --help
+          env -i HOME="$HOME" PATH=/usr/bin:/bin "$exe" selftest --seconds 30
           if find "$portable" -name 'libnvidia-ml*' -o -name 'libcuda*' | grep -q .; then
             echo "NVIDIA driver libraries must not be bundled" >&2
             exit 1

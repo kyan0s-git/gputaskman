@@ -505,6 +505,7 @@ uv run --locked gputaskman --no-hardware       # TUI without the hardware view a
 uv run --locked gputaskman --no-sensors        # skip hardware sensors (Windows: don't start the sensor helper)
 uv run --locked gputaskman --check-update      # is a newer release out? (one request, only when asked)
 uv run --locked gputaskman update              # check, then download, verify and install (Windows installer builds)
+uv run --locked gputaskman selftest            # stress-test the TUI on this machine's readings and fuzzed ones
 uv run --locked gputaskman --help
 ```
 
@@ -516,7 +517,7 @@ uv run --locked gputaskman --help
 | `a` | Switch between top and all collected processes |
 | `m` | Toggle full diagnostics / slim monitoring |
 | `p` | Pause / resume collection |
-| `h` | Hardware view: CPU, memory, disks, network, sensors (`f` filters sensors, `Esc` returns) |
+| `h` | Hardware view: Summary, CPU, Memory, GPUs, drives, network, motherboard, all sensors (`Tab` switches pane, `r` resets min/avg/max, `f` filters sensors, `Esc` returns) |
 | `u` | Check for an update (and install it on an installed Windows copy) |
 | `?` | Explain the counters and their limits |
 | Escape | Close help |
@@ -696,20 +697,31 @@ against the expected 100/32 = 3.1%). **Not validated on hardware:** macOS, Windo
 
 ### Hardware view
 
-`h` opens a second screen in the spirit of Task Manager's Performance tab and HWiNFO's sensor list:
+`h` opens a second screen organized like Task Manager's Performance tab with HWiNFO's detail. A navigation list on
+the left (`↑/↓`, `Tab` to the table) picks a component; the right side shows its headline numbers with 60 s graphs
+and a table of **Now / Min / Avg / Max** for this session (`r` resets them) with each reading's source:
 
-| Panel | Shows | Source |
+| Page | Shows | Source |
 |---|---|---|
-| CPU | model, total and per-thread load, current speed, headline temperature and package power with 60 s trends, processes, threads, handles (Windows), uptime, load average (Linux/macOS) | psutil; Windows speed is Task Manager's own `% Processor Performance` x base clock (psutil reports only the base clock there) |
-| Memory | in use, available, cached, committed / commit limit, swap or pagefile | psutil; Windows performance counters (standby + modified lists for *cached*); `/proc/meminfo` |
-| Disks | read and write rate per physical disk, active time, volume free space | psutil; Windows `% Idle Time` (Task Manager's active time); Linux `busy_time`. Optical and network drives are skipped (an empty drive errors, a share can hang) |
-| Network | download and upload rate per adapter (bits/s), link speed, IPv4 addresses | psutil |
-| Sensors | every temperature, fan, power, voltage, current, clock, load and level reading, grouped by chip, with session min/max | Windows: LibreHardwareMonitor (`lhm`); Linux: `hwmon`, RAPL (`rapl`), batteries; macOS: battery only |
+| Summary | one bar per component (CPU, memory, each GPU and its VRAM, each disk, active network adapters), then the key readings with min/avg/max, drive health, hottest board temperature and fans | everything below |
+| CPU | load total and per logical processor, effective clock total and per logical processor, Tctl/Tdie or package temperature, per-core temperatures, clocks and VIDs, package and per-core power, TjMax, TDP/PL1, core voltage, processes, threads, handles, uptime, load average | psutil; Windows `% Processor Performance` per processor x base clock (psutil reports only the base clock there); Linux `cpufreq`; sensors below |
+| Memory | in use, available, cached, committed / commit limit, swap or pagefile, DIMM temperatures | psutil; Windows performance counters (standby + modified lists for *cached*); `/proc/meminfo`; DIMM sensors |
+| GPU *n* | load, memory controller, encoder, decoder, VRAM and shared memory, graphics/SM and memory clocks, temperature, power and limit, fan, PCIe link, throttle reasons, plus hot spot / memory junction and more from LibreHardwareMonitor or hwmon | the same GPU telemetry as the main view (NVML, ADL, sysfs, ...); extra sensors matched to the GPU by name |
+| Drives | read and write rate, active time, bytes since boot, **S.M.A.R.T. health** (status, temperature and its maximum, power-on hours, wear, read/write errors, reallocated and pending sectors, media errors) and the drive's own sensors | psutil; Windows `% Idle Time`; Linux `busy_time`; health from the Windows Storage Management API (`wmi`) or smartmontools (`smartctl`) |
+| Volumes | used and free space per volume | psutil; optical and network drives are skipped (an empty drive errors, a share can hang) |
+| Network | download and upload (bits/s), totals, errors, drops, link speed, MTU, IPv4 addresses; adapter sensors | psutil; hwmon |
+| Motherboard | VRM, chipset and board temperatures, voltage rails (+12V, +5V, +3.3V, Vcore, ...), fans and fan/pump control, PSU and cooler sensors | Windows: LibreHardwareMonitor (`lhm`); Linux: `hwmon` (nct67xx, it87, ...) |
+| Battery | charge, AC power, time remaining, charge/discharge rate, capacity versus design | psutil; `/sys/class/power_supply` |
+| All sensors | every sensor grouped by chip; `f` filters by kind | all sources |
 
-All of it is machine telemetry as the OS or the sensor reports it: never GPU bytes, never added to a GPU total,
-and ignored by `diff`. Unknown values are `n/a` (`null` in JSON), a measured zero stays `0`, and every rate shows
-`…` until its second reading. The line under the sensor table says what is missing and why. The main view's
-System panel gains one line with the CPU temperature, package power and spinning fans when they are known.
+All of it is machine telemetry as the OS, a driver or a sensor reports it: never GPU bytes added to a GPU total,
+and ignored by `diff`. Unknown values are `n/a` (`null` in JSON), a measured zero stays `0`, every rate shows `…`
+until its second reading, and what a platform cannot report says why on the page (for example *TjMax: AMD does
+not report TjMax to the OS*). Derived values say they are derived: TjMax on Intel under Windows is a core
+temperature plus LibreHardwareMonitor's "distance to TjMax"; on Linux it is coretemp's critical limit. TDP/PL1 is
+RAPL's long-term power limit on Linux; on Windows LibreHardwareMonitor reports no power limit for most processors.
+Sensors that cannot be tied to exactly one device (two drives of the same model) are listed separately rather than
+guessed. The main view's System panel gains one line with the CPU temperature, package power and spinning fans.
 
 **Windows sensors.** CPU, motherboard (Super I/O fans and voltages) and memory sensors need ring-0 access. The
 installer and the portable ZIP include `sensors\gputaskman-sensors.exe`, a small .NET Framework helper that hosts
@@ -728,8 +740,13 @@ amdgpu, ...), RAPL energy counters in `/sys/class/powercap` (power is the rate b
 root-only on current kernels, and the notes say so), and `/sys/class/power_supply`. Containers and VMs usually
 expose no hwmon sensors.
 
-`--once --hardware` and `--json --hardware` add a `hardware` section (`cpu`, `memory`, `disks`, `volumes`,
-`network`, `sensors`, `sensor_source`, `notes`, `cost_ms`); one-shot takes its rates across the second it already
+**Drive health** on Linux needs smartmontools and root (`sudo gputaskman`); it is read in the background every 5
+minutes because `smartctl` can take seconds per drive. On Windows the helper reads the Storage Management API every
+minute; the reliability counters (temperature, wear, power-on hours, errors) need an elevated gputaskman.
+
+`--once --hardware` and `--json --hardware` add a `hardware` section (`cpu` with `per_core_pct` and `per_core_mhz`,
+`memory`, `disks`, `volumes`, `network`, `sensors` with `min`/`avg`/`max`/`limit`, `drive_health`,
+`sensor_source`, `notes`, `cost_ms`); one-shot takes its rates across the second it already
 waits for GPU engine rates, and on Windows runs the sensor helper once (up to 20 s for its first reading).
 Without `--hardware` the JSON is unchanged.
 
@@ -737,6 +754,20 @@ Validated: the hardware view, `--once --hardware` and `--json --hardware` in a L
 there; hwmon and RAPL parsing is covered by tests against recorded sysfs layouts). **Not validated on hardware:**
 LibreHardwareMonitor readings on a physical Windows PC, PawnIO driver behaviour on HVCI-enabled systems, macOS,
 and Linux hwmon on bare metal.
+
+### Self-test and crash log
+
+`gputaskman selftest` stress-tests the TUI headless on your machine: first on its real readings (GPU collectors,
+CPU, disks, network, the sensor helper), then on randomized hostile ones (missing values, NaN, infinities, huge
+numbers, odd and duplicate names, hundreds of cores and sensors). It opens every page, presses every key, resizes
+from tiny to huge and toggles screens, and fails on any crash or any drawing error the hardware view caught.
+`--seconds N` sets the length (default 30), `--seed N` replays a run, `--real-only`/`--fuzz-only` pick a phase. The
+release workflow runs it against every frozen build, on Windows both before and after installing PawnIO.
+
+If gputaskman ever stops with an error, the traceback is appended to a local crash log:
+`%LOCALAPPDATA%\gputaskman\crash.log` on Windows, `~/.cache/gputaskman/crash.log` elsewhere (about 1 MB at most,
+never sent anywhere; it can contain local paths). In its own window the window stays open on an error so it can be
+read. A page of the hardware view that fails to draw shows the error in place and the app keeps running.
 
 ### Updates
 
@@ -1026,6 +1057,9 @@ Identification is designed to stay cheap. Measured on one Windows machine:
 | vLLM `/v1/models` | 1.32 ms median, 21.36 ms max in 30 loopback fixture GETs; cached lookup ~0.0004 ms (Windows 11 build 28000, ARM64; no vLLM runtime/GPU workload) | One GET, 0.5 s timeout and 4 MiB response cap; success cached 3 s, misses/401 cached 30 s. No redirects; actual Linux/vLLM latency unmeasured |
 | `psutil.open_files()` | 0.6-2.5 s per process | Never |
 | Hardware view: CPU, memory, disks, network, Linux hwmon/RAPL | 1.2-2.4 ms per refresh (Linux container, 4 threads, 6 virtual disks, no hwmon sensors); Windows unmeasured | Every refresh while the TUI runs, unless `--no-hardware`; volumes and addresses every 5 s |
+| Linux per-core clocks (`cpufreq`) | One small file read per logical CPU; not measured separately (absent in the test container) | Every refresh |
+| Linux drive health (`smartctl -j -i -H -A`) | Seconds per drive, in a background thread | Every 5 minutes, only as root with smartmontools installed |
+| Windows drive health (Storage Management API in the helper) | Unmeasured; runs on the helper's own thread | Every minute |
 | Windows sensor helper (LibreHardwareMonitor) | Unmeasured on hardware; runs in its own process, so the TUI only parses one JSON line per refresh | One helper per TUI session, updating every refresh interval; `--once --hardware` runs it once (up to 20 s) |
 | Update check | One HTTPS GET, 15 s timeout | Only when asked (`u`, `--check-update`, `gputaskman update`) |
 | AMD and Intel on Linux: DRM fdinfo scan (`readlink` every fd, read fdinfo of `/dev/dri` ones) | ~9 ms for ~8,000 fds (AMD, Linux desktop; Intel not measured) | Every refresh, only when an amdgpu or Intel card is shown; listing fds is bounded to 50 ms in the TUI and resumes next refresh, known GPU fds are still read |

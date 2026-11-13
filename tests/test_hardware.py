@@ -30,7 +30,7 @@ class LinuxSensorTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def source(self):
-        return LinuxSensors(self.hwmon, self.rapl, self.supply)
+        return LinuxSensors(self.hwmon, self.rapl, self.supply, smart=False)
 
     def test_hwmon_units_labels_and_unknown(self):
         write(self.hwmon / "hwmon0", {"name": "k10temp", "temp1_input": 61250, "temp1_label": "Tctl"})
@@ -83,6 +83,24 @@ class LinuxSensorTests(unittest.TestCase):
             reading = src.read()
         self.assertTrue(any("root" in note for note in reading.notes))
         self.assertFalse(any(s.source == "rapl" for s in reading.sensors))
+
+    @unittest.skipIf(sys.platform == "win32", "RAPL zone names contain ':', which Windows paths cannot")
+    def test_rapl_power_limits_are_reported_without_root(self):
+        write(self.rapl / "intel-rapl:0", {"name": "package-0", "constraint_0_name": "long_term",
+                                           "constraint_0_power_limit_uw": 125_000_000, "constraint_1_name": "short_term",
+                                           "constraint_1_power_limit_uw": 253_000_000})
+        with mock.patch.object(sensors, "battery_sensors", return_value=[]):
+            reading = self.source().read()
+        limits = {s.name: s.value for s in reading.sensors if "limit" in s.name}
+        self.assertEqual(limits, {"Package power limit PL1 (long term, TDP)": 125.0,
+                                  "Package power limit PL2 (short term)": 253.0})
+
+    def test_coretemp_critical_limit_is_tjmax(self):
+        write(self.hwmon / "hwmon0", {"name": "coretemp", "temp1_input": 50000, "temp1_label": "Package id 0",
+                                      "temp1_crit": 100000})
+        with mock.patch.object(sensors, "battery_sensors", return_value=[]):
+            s = self.source().read().sensors[0]
+        self.assertEqual(s.limit, 100.0)
 
     def test_no_hwmon_is_explained(self):
         with mock.patch.object(sensors, "battery_sensors", return_value=[]):
@@ -177,14 +195,15 @@ class MachineTests(unittest.TestCase):
         self.assertTrue(all(d.read_bps is None for d in first.disks))
         self.assertTrue(all(n.rx_bps is None for n in first.nics))
         d = machine.to_dict(second)
-        self.assertEqual(set(d), {"cpu", "memory", "disks", "volumes", "network", "sensors", "sensor_source", "notes", "cost_ms"})
+        self.assertEqual(set(d), {"cpu", "memory", "disks", "volumes", "network", "sensors", "drive_health", "sensor_source", "notes",
+                                  "cost_ms"})
         self.assertGreater(d["memory"]["total"], 0)
         json.dumps(d)  # serializable
         self.assertIn("Hardware", machine.to_text(second))
 
     def test_windows_disk_active_time_maps_physical_drives(self):
         sampler = machine.HardwareSampler.__new__(machine.HardwareSampler)
-        sampler._disk_names, sampler._last_disk = None, {}
+        sampler._disk_names, sampler._last_disk, sampler._models = None, {}, {}
         counters = {"PhysicalDrive0": mock.Mock(read_bytes=10, write_bytes=20, busy_time=0),
                     "PhysicalDrive1": mock.Mock(read_bytes=0, write_bytes=0, busy_time=0)}
         with mock.patch.object(machine.psutil, "disk_io_counters", return_value=counters), \

@@ -88,6 +88,10 @@ def main() -> None:
         return diff_main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "record":
         return record_main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "selftest":
+        from .stress import main as selftest_main
+
+        sys.exit(selftest_main(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == "update":
         from .update import main as update_main
 
@@ -95,7 +99,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(prog="gputaskman", description="What's inside your GPU: per-process VRAM, engines, and LLM weights/KV-cache breakdown.",
                                  epilog="gputaskman diff BEFORE.json AFTER.json compares two --json snapshots; "
                                         "gputaskman record -o FILE appends one --json snapshot per interval to FILE; "
-                                        "gputaskman update checks for (and installs) a newer release.")
+                                        "gputaskman update checks for (and installs) a newer release; "
+                                        "gputaskman selftest stress-tests the TUI on this machine.")
     ap.add_argument("--once", action="store_true", help="print one snapshot and exit (no TUI)")
     ap.add_argument("--json", action="store_true", help="print one JSON snapshot and exit (implies --once)")
     ap.add_argument("--gpu", type=int, help="show only this GPU (TUI default: all; one-shot default: 0)")
@@ -211,3 +216,12 @@ def main() -> None:
     except Exception as error:  # in its own window a crash would vanish with the window
         hold_on_error(error)
         raise SystemExit(1) from error
+    if app.return_code:  # Textual already printed the traceback; keep the window open so it can be read
+        from . import crashlog
+
+        try:
+            input(f"\ngputaskman stopped with an error (above; also saved to {crashlog.path()}). "
+                  "Press Enter to close this window.")
+        except (EOFError, KeyboardInterrupt):
+            pass
+        raise SystemExit(app.return_code)
