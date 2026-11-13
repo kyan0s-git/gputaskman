@@ -23,6 +23,8 @@ ROOT = Path(__file__).resolve().parents[1]
 MACHINES = {"x64": 0x8664, "arm64": 0xAA64}  # PE machine
 ELF_MACHINES = {"x64": 0x3E, "arm64": 0xB7}  # ELF e_machine
 # Provided by Windows or the installed GPU driver, never by the portable app.
+# The PawnIO kernel driver is installed only by PawnIO's own signed setup (an installer option); it never goes in
+# the app folder, and neither does any other kernel driver (.sys).
 FORBIDDEN = ("nvml.dll", "nvcuda.dll", "atiadlxx.dll", "amd_smi.dll", "libamd_smi.so", "dxgi.dll", "pdh.dll", "libnvidia-ml.so", "libcuda.so", "libdxcore.so")
 PLATFORMS = {"win-amd64": ("windows", "x64"), "win-arm64": ("windows", "arm64"),
              "linux-x86_64": ("linux", "x64"), "linux-aarch64": ("linux", "arm64")}
@@ -40,7 +42,7 @@ def architecture(platform_tag: str) -> str:
 
 def is_forbidden(name: str) -> bool:
     name = name.lower()
-    return any(name == f or name.startswith(f + ".") for f in FORBIDDEN)
+    return name.endswith(".sys") or any(name == f or name.startswith(f + ".") for f in FORBIDDEN)
 
 
 def validate_version(version: str, tag: str | None = None) -> None:
@@ -50,7 +52,8 @@ def validate_version(version: str, tag: str | None = None) -> None:
         raise ValueError(f"Release tag {tag!r} must match package version v{version}")
 
 
-def check_executable(path: Path, arch: str) -> None:
+def check_executable(path: Path, arch: str, managed: bool = False) -> None:
+    """A PE file for this architecture. A .NET Framework (managed) exe may be AnyCPU (marked x86/i386)."""
     with path.open("rb") as binary:
         header = binary.read(64)
         if len(header) != 64 or header[:2] != b"MZ":
@@ -60,6 +63,8 @@ def check_executable(path: Path, arch: str) -> None:
     if len(pe) != 6 or pe[:4] != b"PE\0\0":
         raise ValueError(f"Invalid PE header: {path}")
     machine = struct.unpack_from("<H", pe, 4)[0]
+    if managed and machine in (0x014C, MACHINES[arch]):
+        return
     if machine != MACHINES[arch]:
         raise ValueError(f"Expected {arch} PE machine {MACHINES[arch]:#06x}, got {machine:#06x}")
 
@@ -146,15 +151,43 @@ def find_iscc() -> Path:
     raise RuntimeError("Inno Setup compiler (ISCC.exe) not found; install it with: winget install JRSoftware.InnoSetup")
 
 
-def create_installer(bundle: Path, output: Path, version: str, arch: str) -> Path:
+PAWNIO_VERSION = "2.2.0"
+PAWNIO_SHA256 = "1f519a22e47187f70a1379a48ca604981c4fcf694f4e65b734aaa74a9fba3032"
+PAWNIO_URL = f"https://github.com/namazso/PawnIO.Setup/releases/download/{PAWNIO_VERSION}/PawnIO_setup.exe"
+
+
+def check_pawnio(path: Path) -> None:
+    """The PawnIO setup the installer may run must be exactly the pinned, reviewed release."""
+    with path.open("rb") as setup:
+        digest = hashlib.file_digest(setup, "sha256").hexdigest()
+    if digest != PAWNIO_SHA256:
+        raise ValueError(f"{path} is not PawnIO {PAWNIO_VERSION} (sha256 {digest})")
+
+
+def add_sensors(bundle: Path, sensors: Path, arch: str) -> None:
+    """Copy the published gputaskman-sensors helper (tools/sensors) into bundle/sensors."""
+    helper = sensors / "gputaskman-sensors.exe"
+    check_executable(helper, arch, managed=True)
+    target = bundle / "sensors"
+    shutil.copytree(sensors, target, ignore=shutil.ignore_patterns("*.pdb", "*.xml"))
+    for path in target.rglob("*"):
+        if path.is_file() and is_forbidden(path.name):
+            raise ValueError(f"Driver/system library must not be distributed: {path}")
+
+
+def create_installer(bundle: Path, output: Path, version: str, arch: str, pawnio: Path | None = None) -> Path:
     """Wrap the verified bundle in a setup program. The same checks as the ZIP run first."""
     validate_version(version)
     check_executable(bundle / "gputaskman.exe", arch)
     _bundle_files(bundle)
     output.mkdir(parents=True, exist_ok=True)
+    defines = [f"/DAppVersion={version}", f"/DArch={arch}", f"/DSourceDir={bundle}", f"/DOutputDir={output}",
+               f"/DIconFile={ROOT / 'tools' / 'assets' / 'gputaskman.ico'}"]
+    if pawnio is not None:
+        check_pawnio(pawnio)
+        defines += [f"/DPawnIOSetup={pawnio}", f"/DPawnIOVersion={PAWNIO_VERSION}"]
     subprocess.run(
-        [str(find_iscc()), "/Qp", f"/DAppVersion={version}", f"/DArch={arch}",
-         f"/DSourceDir={bundle}", f"/DOutputDir={output}", str(ROOT / "tools" / "installer.iss")],
+        [str(find_iscc()), "/Qp", *defines, str(ROOT / "tools" / "installer.iss")],
         check=True,
     )
     installer = output / f"gputaskman-{version}-windows-{arch}-setup.exe"
@@ -235,7 +268,8 @@ Documentation: https://github.com/shanselman/gputaskman
 """
 
 
-def build(output: Path, arch: str, tag: str | None = None, installer: bool = False) -> Path:
+def build(output: Path, arch: str, tag: str | None = None, installer: bool = False, sensors: Path | None = None,
+          pawnio: Path | None = None) -> Path:
     system, actual = target(sysconfig.get_platform())
     if actual != arch:
         raise ValueError(f"Requested {arch}, but this Python interpreter is {actual}")
@@ -256,19 +290,26 @@ def build(output: Path, arch: str, tag: str | None = None, installer: bool = Fal
         )
         bundle = work / "dist" / "gputaskman"
         add_notices(bundle, system)
+        if sensors is not None:
+            if system != "windows":
+                raise ValueError("The sensor helper is Windows-only")
+            add_sensors(bundle, sensors, arch)
         if system == "linux":
             (bundle / "README.txt").write_text(README_LINUX.format(version=version, arch=arch), encoding="utf-8")
             return create_linux_archive(bundle, output, version, arch)
         (bundle / "README.txt").write_text(
             f"GPU Task Manager {version} - Windows {arch}\n\n"
             "Extract the entire ZIP before running. Keep _internal beside gputaskman.exe.\n"
-            "Open PowerShell or Windows Terminal in this folder:\n\n"
+            "Double-click \"GPU Task Manager.exe\" to open it in its own window, or run it from PowerShell or\n"
+            "Windows Terminal in this folder:\n\n"
             "  .\\gputaskman.exe\n"
             "  .\\gputaskman.exe --once\n"
             "  .\\gputaskman.exe --json\n\n"
             "Press q to quit the interactive display.\n"
             "Requires Windows and an NVIDIA or AMD GPU with a current WDDM driver.\n"
             "No Python, uv, CUDA Toolkit, models, or administrator session is required.\n"
+            "CPU temperatures, fans and package power (the h hardware view) need the PawnIO driver and an\n"
+            "elevated gputaskman; the installer can set up PawnIO, this ZIP does not install any driver.\n"
             "This build is unsigned. No drivers or inference servers are bundled.\n"
             "Snapshots can contain local paths and model names; redact before sharing.\n\n"
             "Documentation: https://github.com/shanselman/gputaskman\n",
@@ -276,7 +317,7 @@ def build(output: Path, arch: str, tag: str | None = None, installer: bool = Fal
         )
         archive = create_archive(bundle, output, version, arch)
         if installer:
-            create_installer(bundle, output, version, arch)
+            create_installer(bundle, output, version, arch, pawnio)
         return archive
 
 
@@ -287,8 +328,15 @@ def main() -> None:
     parser.add_argument("--tag", help="Require a release tag matching the package version")
     parser.add_argument("--installer", action="store_true",
                         help="Windows only: also build the Inno Setup installer beside the ZIP")
+    parser.add_argument("--sensors", type=Path,
+                        help="Windows only: the published tools/sensors helper folder to include (dotnet publish -o)")
+    parser.add_argument("--pawnio-setup", type=Path,
+                        help=f"Windows installer only: PawnIO_setup.exe {PAWNIO_VERSION} (checked against its pinned "
+                             "SHA-256), offered as the sensor-driver option")
     args = parser.parse_args()
-    print(build(args.output.resolve(), args.arch, args.tag, args.installer))
+    print(build(args.output.resolve(), args.arch, args.tag, args.installer,
+                args.sensors.resolve() if args.sensors else None,
+                args.pawnio_setup.resolve() if args.pawnio_setup else None))
 
 
 if __name__ == "__main__":

@@ -28,6 +28,21 @@ jobs:
           python-version: "3.13"
       - run: uv sync --locked --group release
       - run: uv run --locked python -m unittest discover -s tests -v
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Build the sensor helper (LibreHardwareMonitorLib)
+        shell: pwsh
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+        run: |
+          dotnet publish tools/sensors/GpuTaskmanSensors.csproj -c Release -r "win-$env:BUILD_ARCH" -o build/sensors
+          if ($LASTEXITCODE -ne 0) { throw "Sensor helper build failed" }
+      - name: Download PawnIO setup (hash-pinned in tools/build_portable.py)
+        shell: pwsh
+        run: |
+          $version = uv run --locked python -c "import sys; sys.path.insert(0, 'tools'); import build_portable as b; print(b.PAWNIO_VERSION)"
+          Invoke-WebRequest -Uri "https://github.com/namazso/PawnIO.Setup/releases/download/$version/PawnIO_setup.exe" -OutFile build/PawnIO_setup.exe
       - name: Install Inno Setup
         shell: pwsh
         run: |
@@ -42,7 +57,7 @@ jobs:
         env:
           BUILD_ARCH: ${{ matrix.arch }}
         run: |
-          $buildArgs = @("--arch", $env:BUILD_ARCH, "--installer")
+          $buildArgs = @("--arch", $env:BUILD_ARCH, "--installer", "--sensors", "build\sensors", "--pawnio-setup", "build\PawnIO_setup.exe")
           if ($env:GITHUB_REF_TYPE -eq "tag") {
             $buildArgs += @("--tag", $env:GITHUB_REF_NAME)
           }
@@ -62,6 +77,16 @@ jobs:
           try {
             & $exe --help
             if ($LASTEXITCODE -ne 0) { throw "Frozen executable smoke test failed" }
+            $dir = Split-Path $exe
+            if (-not (Test-Path (Join-Path $dir "GPU Task Manager.exe"))) { throw "The windowed launcher is missing" }
+            if (Get-ChildItem $dir -Recurse -Filter *.sys) { throw "A kernel driver must never be in the app folder" }
+            $helper = Join-Path $dir "sensors\gputaskman-sensors.exe"
+            $line = & $helper --once | Select-Object -Last 1
+            $reading = $line | ConvertFrom-Json
+            Write-Host "Sensor helper: admin=$($reading.admin) pawnio=$($reading.pawnio) hardware=$($reading.hardware.Count) error=$($reading.error)"
+            $json = & $exe --json --hardware | ConvertFrom-Json
+            if (-not $json.hardware.cpu) { throw "--json --hardware has no hardware section" }
+            Write-Host "Hardware: $($json.hardware.cpu.model); sensors=$($json.hardware.sensors.Count); notes=$($json.hardware.notes -join ' | ')"
           } finally {
             Pop-Location
           }
@@ -72,9 +97,22 @@ jobs:
           $target = Join-Path $env:RUNNER_TEMP "installed app"
           $log = Join-Path $env:RUNNER_TEMP "setup.log"
           $p = Start-Process -FilePath $setup.FullName -Wait -PassThru -ArgumentList @(
-            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/TASKS=addtopath",
+            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/TASKS=addtopath,sensordriver",
             "/DIR=`"$target`"", "/LOG=`"$log`"")
           if ($p.ExitCode -ne 0) { Get-Content $log; throw "Installer failed: $($p.ExitCode)" }
+          $pawnio = Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO"
+          Write-Host "PawnIO installed by the sensor-driver task: $pawnio"
+          # Sensors after the driver install (hosted runners are VMs: few sensors, but nothing may crash).
+          $json = & (Join-Path $target "gputaskman.exe") --json --hardware | ConvertFrom-Json
+          if (-not $json.hardware.cpu) { throw "--json --hardware has no hardware section after install" }
+          Write-Host "Installed sensors=$($json.hardware.sensors.Count); notes=$($json.hardware.notes -join ' | ')"
+          # The windowed launcher must start the TUI (in its own conhost window) and keep it running.
+          Start-Process -FilePath (Join-Path $target "GPU Task Manager.exe")
+          Start-Sleep -Seconds 8
+          $running = Get-Process gputaskman -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$target*" }
+          if (-not $running) { throw "The launcher did not start gputaskman.exe" }
+          $running | Stop-Process -Force
+          Get-Process conhost -ErrorAction SilentlyContinue | Out-Null
           foreach ($name in "gputaskman.exe", "gtm.exe") {
             $exe = Join-Path $target $name
             if (-not (Test-Path $exe)) { throw "$name was not installed" }

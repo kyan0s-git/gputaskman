@@ -88,9 +88,14 @@ def main() -> None:
         return diff_main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "record":
         return record_main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "update":
+        from .update import main as update_main
+
+        sys.exit(update_main(sys.argv[2:]))
     ap = argparse.ArgumentParser(prog="gputaskman", description="What's inside your GPU: per-process VRAM, engines, and LLM weights/KV-cache breakdown.",
                                  epilog="gputaskman diff BEFORE.json AFTER.json compares two --json snapshots; "
-                                        "gputaskman record -o FILE appends one --json snapshot per interval to FILE.")
+                                        "gputaskman record -o FILE appends one --json snapshot per interval to FILE; "
+                                        "gputaskman update checks for (and installs) a newer release.")
     ap.add_argument("--once", action="store_true", help="print one snapshot and exit (no TUI)")
     ap.add_argument("--json", action="store_true", help="print one JSON snapshot and exit (implies --once)")
     ap.add_argument("--gpu", type=int, help="show only this GPU (TUI default: all; one-shot default: 0)")
@@ -99,8 +104,21 @@ def main() -> None:
                     help="WSL: don't read Windows host GPU counters through interop (WSL VM total, Windows apps)")
     ap.add_argument("--no-system", action="store_true",
                     help="don't sample system RAM/CPU: no TUI panel or RAM/CPU%% columns, no system section in --once/--json")
+    ap.add_argument("--hardware", action="store_true",
+                    help="--once/--json: add CPU, memory, disks, network and sensors (a hardware section)")
+    ap.add_argument("--no-hardware", action="store_true",
+                    help="TUI: don't sample CPU, disks, network or sensors (no hardware view, no sensor line)")
+    ap.add_argument("--no-sensors", action="store_true",
+                    help="don't read hardware sensors (on Windows: don't start the LibreHardwareMonitor helper)")
+    ap.add_argument("--check-update", action="store_true",
+                    help="check this project's GitHub releases for a newer version and exit")
+    ap.add_argument("--window", action="store_true", help=argparse.SUPPRESS)  # set by the Windows launcher
     ap.add_argument("-i", "--interval", type=float, default=1.0, help="refresh seconds (default 1)")
     args = ap.parse_args()
+    if args.check_update:
+        from .update import main as update_main
+
+        sys.exit(update_main(["--check"]))
     if args.gpu is not None and args.gpu < 0:
         ap.error("--gpu must be a non-negative index")
     if not math.isfinite(args.interval) or args.interval <= 0:
@@ -150,6 +168,15 @@ def main() -> None:
                     sampler.sample()  # per-process CPU% is a rate too; this primes it
                 except Exception as error:  # system RAM/CPU is extra: its failure must not cost the GPU report
                     sampler, system_error = None, f"{type(error).__name__}: {error}"
+            hw_sampler, hardware, hardware_error = None, None, None
+            if args.hardware:
+                try:
+                    from .machine import HardwareSampler
+
+                    hw_sampler = HardwareSampler(sensors=not args.no_sensors, one_shot=True)
+                    hw_sampler.sample()  # disk, network and RAPL readings are rates too
+                except Exception as error:  # hardware telemetry is extra: its failure must not cost the GPU report
+                    hw_sampler, hardware_error = None, f"{type(error).__name__}: {error}"
             time.sleep(1.0)  # engine utilization is a rate; needs two samples
             snapshot = c.sample()
             if sampler:
@@ -157,11 +184,30 @@ def main() -> None:
                     system = sampler.sample()
                 except Exception as error:
                     system_error = f"{type(error).__name__}: {error}"
-            print(dump(snapshot, args.json, system, system_error))
+            if hw_sampler:
+                try:
+                    hardware = hw_sampler.sample()
+                except Exception as error:
+                    hardware_error = f"{type(error).__name__}: {error}"
+                finally:
+                    hw_sampler.close()
+            print(dump(snapshot, args.json, system, system_error, hardware, hardware_error))
         finally:
             c.close()
         return
 
     from .app import GpuTaskManager
 
-    GpuTaskManager(gpu_index=args.gpu, interval=args.interval, host=not args.no_host, system=not args.no_system).run()
+    app = GpuTaskManager(gpu_index=args.gpu, interval=args.interval, host=not args.no_host, system=not args.no_system,
+                         hardware=not args.no_hardware, sensors=not args.no_sensors)
+    if not args.window:
+        app.run()
+        return
+    from .window import hold_on_error, setup_console
+
+    setup_console()
+    try:
+        app.run()
+    except Exception as error:  # in its own window a crash would vanish with the window
+        hold_on_error(error)
+        raise SystemExit(1) from error

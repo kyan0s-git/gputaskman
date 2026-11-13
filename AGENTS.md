@@ -34,14 +34,20 @@ these rules:
    foreign-context sizes in `~/.cache/gputaskman/`, only rank candidates and never prove ownership.
 6. **Look, don't touch.** Never read another process's memory, dump weights, launch runtimes, send
    inference requests, or send telemetry. Local API probes are `GET` requests to ports the process
-   already listens on.
+   already listens on. Two deliberate, opt-in exceptions: the update check (`update.py`) contacts GitHub
+   only when the user asks, and the Windows sensor helper (`tools/sensors`) lets LibreHardwareMonitor probe
+   Super I/O, SMBus and embedded controllers through PawnIO. The helper only reads sensors; never add code that
+   sets fan speeds, clocks or voltages.
 7. **Stay cheap.** Never call `psutil.open_files()` (it takes seconds per process). Memory-map scans
    are bounded by `Collector.SCAN_BUDGET` (150 ms per refresh) and cached per process; GGUF headers
    and store manifests are cached. If you add a probe, measure its cost and add it to the README's
    cost table.
 8. **Never bundle driver libraries.** Vendor libraries come from the installed driver. The
    `FORBIDDEN` list in `tools/build_portable.py` enforces this for NVIDIA libraries; extend it for
-   any new vendor.
+   any new vendor. No kernel driver (`*.sys`) ever goes in the app folder. The one driver the project
+   distributes is PawnIO, and only as its official signed setup program: pinned version and SHA-256
+   (`PAWNIO_VERSION`, `PAWNIO_SHA256`), run by the installer's optional sensor-driver task. Bumping it means
+   reviewing the new release and updating both constants.
 9. **Degrade with a reason.** A missing vendor library, a protected process, WSL interop being off,
    or an unpaired adapter reduces what is shown and says why. It must not crash or guess.
 10. **Hardware claims need hardware.** Say which machine, driver, and workload validated a
@@ -63,6 +69,10 @@ cli.py ──► Collector.sample()  (collector.py)
             └─ app adapters    handy.py (settings + bounded log tail)
          ──► Snapshot ──► app.py (Textual TUI) / report.py (text and JSON)
 cli.py ──► HostSampler.sample()  (host.py: system RAM/CPU, OS-reported; sampled beside the Collector, not in Snapshot)
+cli.py ──► HardwareSampler.sample()  (machine.py: CPU, memory, disks, volumes, network; sensors.py: lhm helper / hwmon / RAPL / battery)
+            └─ TUI: hwview.py HardwareScreen (h); --once/--json only with --hardware ("hardware" key)
+cli.py update / --check-update ──► update.py (GitHub releases, SHA-256-verified installer); updateview.py (u)
+GPU Task Manager.exe ──► launcher.py ──► conhost.exe gputaskman.exe --window (window.py: title, icon, font, size)
 cli.py diff ──► diff.py: compares two saved --json snapshots (no collection)
 cli.py record ──► record.py: appends one --json snapshot per interval (Collector, or LiveCollectors on Windows, sampled as the TUI does)
 ```
@@ -89,6 +99,9 @@ identify everything immediately; the TUI spreads scans across refreshes.
 | Change system RAM/CPU | `host.py` | Machine memory and load as the OS reports them: never GPU bytes, never added to `Snapshot.attributed`, and `diff` ignores it. Unknown is `None`/`null` and a failure carries a reason, never zeros. The JSON key is `system` because `host` already means the WSL Windows host. Windows uses the NT process list (psutil per process takes about 6 s per pass for 1,000 processes), checked against psutil at startup; CPU rates are keyed by `(pid, create_time)` so a reused PID never inherits another process's history (on the psutil path, `is_running()` is what makes psutil drop its cached object for a reused PID; keep that call) |
 | Change WSL matching | `wslhost.py` `ContextTracker` | Keep `tests/test_wslhost.py` replays passing; they are measured sequences |
 | Change TCC support | `tcc.py`, the win32 `enumerate_adapters` wrapper in `collector.py` | NVML only, never a PDH query (Windows publishes no counters for a TCC GPU). NVML is asked once per process; TCC GPUs are paired to DXGI only when the domainless address is unambiguous (PCI domain 0), while the full domain stays in TCC identity and its synthetic LUID. Append after listed adapters so no existing GPU index moves. A process whose memory NVML hides is `n/a` with `attributed` unknown, never 0. No model breakdown (it needs the shared counter). `--list-gpus` distinguishes a successful empty probe from a failed/incomplete probe. Keep `tests/test_tcc.py` passing; mocks do not validate TCC hardware |
+| Change hardware telemetry | `machine.py`, `sensors.py`, `hwview.py` | Machine readings, never GPU bytes and never in `Snapshot.attributed`; `diff` ignores them. Every sensor names its `source`. Rates are `None` on the first reading. `psutil.cpu_percent` keeps module-global state that `host.py` relies on: compute CPU load from `cpu_times` deltas instead. Never touch optical or network volumes. Keep `tests/test_hardware.py` passing |
+| Change the Windows sensor helper | `tools/sensors` (C#, .NET Framework 4.7.2) | Read-only; prints one JSON line per reading, `null` for unknown; exits when stdin closes. LibreHardwareMonitorLib version is pinned in the `.csproj`. Built by the release workflow with `dotnet publish -r win-<arch>` and copied in with `build_portable.py --sensors` |
+| Change updates | `update.py`, `updateview.py`, `tools/installer.iss` (`/RELAUNCH`) | Only on request; HTTPS only; refuse to install without a matching `.sha256`. `REPO` names the release source |
 | Change recording | `record.py`, `cli.py` `record_main` | Every line must equal the `--json` object (`report.to_json_dict`, which `dump()` also uses), so unknown stays `null` and nothing is added or summed. Append only, one compact line per sample, flushed as it is written: Ctrl+C or a kill keeps every finished sample, and an interrupted sample writes nothing. Sample the way the TUI does (budgeted scanning, `LiveCollectors` on Windows so a GPU disable/re-enable is recorded as unavailable with a reason); never add a probe, `scan_budget=None`, or `psutil.open_files()` |
 
 ## Verify
@@ -121,7 +134,8 @@ uv run --locked gputaskman --json
 2. Run the tests, commit `Release vX.Y.Z`, and push `main`.
 3. `git tag -a vX.Y.Z -m "GPU Task Manager vX.Y.Z"` and `git push origin refs/tags/vX.Y.Z`.
 
-`.github/workflows/release.yml` builds Windows x64/ARM64 archives plus Inno Setup installers
+`.github/workflows/release.yml` builds the sensor helper (`dotnet publish`), downloads the pinned PawnIO setup,
+then builds Windows x64/ARM64 archives plus Inno Setup installers
 (`tools/installer.iss`, via `build_portable.py --installer`) and Linux x64/ARM64 archives, smoke-tests
 each extracted executable without Python (and the installer by silent install/run/uninstall), and publishes them together with checksums and generated
 notes. The build fails if the tag does not match `project.version`. A manual `workflow_dispatch`

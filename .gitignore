@@ -27,3 +27,7 @@ htmlcov/
 result
 result-*
 captures/
+
+# .NET sensor helper build output
+tools/sensors/bin/
+tools/sensors/obj/

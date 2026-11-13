@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    gputaskman-sensors.exe: a small helper that hosts LibreHardwareMonitorLib and prints one JSON line
+    per reading on stdout. gputaskman starts it, reads the lines, and stops it by closing stdin.
+    It targets .NET Framework (in every Windows 10/11 install), so the helper adds no runtime download.
+    LibreHardwareMonitorLib reads CPU, motherboard, memory and storage sensors through the PawnIO driver,
+    which the Windows installer can install (it is never placed in the app folder).
+    Build: dotnet publish -c Release -r win-x64 (or win-arm64) -o <dir>
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>gputaskman-sensors</AssemblyName>
+    <RootNamespace>GpuTaskmanSensors</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <SelfContained>false</SelfContained>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <AllowedReferenceRelatedFileExtensions>.pdb</AllowedReferenceRelatedFileExtensions>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="LibreHardwareMonitorLib" Version="0.9.6" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

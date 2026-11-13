@@ -1,8 +1,10 @@
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 
 root = Path(SPECPATH).parent
+icon = str(root / "tools" / "assets" / "gputaskman.ico")
 analysis = Analysis(
     [str(root / "tools" / "portable_entry.py")],
     pathex=[str(root / "src")],
@@ -28,5 +30,23 @@ exe = EXE(
     exclude_binaries=True,
     name="gputaskman",
     console=True,
+    icon=icon,
 )
-bundle = COLLECT(exe, analysis.binaries, analysis.datas, name="gputaskman")
+parts = [exe, analysis.binaries, analysis.datas]
+
+if sys.platform == "win32":
+    # "GPU Task Manager.exe": a windowless launcher that opens the TUI in a console window of its own.
+    launcher = Analysis([str(root / "tools" / "launcher_entry.py")], pathex=[str(root / "src")])
+    launcher.binaries = [entry for entry in launcher.binaries if not is_driver_lib(Path(entry[0]).name)]
+    launcher_exe = EXE(
+        PYZ(launcher.pure),
+        launcher.scripts,
+        [],
+        exclude_binaries=True,
+        name="GPU Task Manager",
+        console=False,
+        icon=icon,
+    )
+    parts += [launcher_exe, launcher.binaries, launcher.datas]
+
+bundle = COLLECT(*parts, name="gputaskman")

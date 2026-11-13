@@ -146,10 +146,6 @@ class LinuxPortableTests(unittest.TestCase):
                 os.remove(root / lib)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class InstallerTests(unittest.TestCase):
     def test_installer_runs_iscc_with_bundle_and_writes_checksum(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -182,6 +178,46 @@ class InstallerTests(unittest.TestCase):
             (bundle / "nvml.dll").write_bytes(b"x")
             with self.assertRaises(ValueError):
                 build_portable.create_installer(bundle, bundle / "out", "1.2.3", "x64")
+
+
+class SensorBundleTests(unittest.TestCase):
+    def pe(self, path, machine):
+        header = bytearray(64)
+        header[:2] = b"MZ"
+        struct.pack_into("<I", header, 60, 64)
+        path.write_bytes(header + b"PE\0\0" + struct.pack("<H", machine))
+
+    def test_kernel_drivers_are_forbidden(self):
+        self.assertTrue(build_portable.is_forbidden("PawnIO.sys"))
+        self.assertTrue(build_portable.is_forbidden("WinRing0x64.SYS"))
+        self.assertFalse(build_portable.is_forbidden("LibreHardwareMonitorLib.dll"))
+
+    def test_pawnio_setup_must_match_the_pinned_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            setup = Path(tmp) / "PawnIO_setup.exe"
+            setup.write_bytes(b"not pawnio")
+            with self.assertRaises(ValueError):
+                build_portable.check_pawnio(setup)
+
+    def test_sensor_helper_is_copied_and_checked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            helper, bundle = root / "helper", root / "bundle"
+            helper.mkdir()
+            bundle.mkdir()
+            self.pe(helper / "gputaskman-sensors.exe", 0x8664)
+            (helper / "LibreHardwareMonitorLib.dll").write_bytes(b"x")
+            (helper / "gputaskman-sensors.pdb").write_bytes(b"x")
+            build_portable.add_sensors(bundle, helper, "x64")
+            self.assertTrue((bundle / "sensors" / "LibreHardwareMonitorLib.dll").is_file())
+            self.assertFalse((bundle / "sensors" / "gputaskman-sensors.pdb").exists())
+            with self.assertRaises(ValueError):  # an arm64 helper in an x64 build
+                self.pe(helper / "gputaskman-sensors.exe", 0xAA64)
+                build_portable.add_sensors(root / "other", helper, "x64")
+            self.pe(helper / "gputaskman-sensors.exe", 0x8664)
+            (helper / "PawnIO.sys").write_bytes(b"x")
+            with self.assertRaises(ValueError):
+                build_portable.add_sensors(root / "third", helper, "x64")
 
 
 if __name__ == "__main__":

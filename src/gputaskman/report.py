@@ -289,8 +289,10 @@ def to_text(s: Snapshot, limit: int = 30) -> str:
     return "\n".join(out)
 
 
-def to_json_dict(s: Snapshot, system=None, system_error: str | None = None) -> dict:
-    """The --json object: to_dict plus the optional OS-reported "system" section (or why it is missing)."""
+def to_json_dict(s: Snapshot, system=None, system_error: str | None = None, hardware=None,
+                 hardware_error: str | None = None) -> dict:
+    """The --json object: to_dict plus the optional OS-reported "system" section (or why it is missing), and the
+    optional "hardware" section (--hardware: CPU, disks, network, sensors; machine readings, never GPU bytes)."""
     from . import host as hostmod
 
     d = to_dict(s)
@@ -298,16 +300,32 @@ def to_json_dict(s: Snapshot, system=None, system_error: str | None = None) -> d
         d["system"] = hostmod.to_dict(system)
     elif system_error:
         d["system"] = {"error": system_error}
+    if hardware is not None:
+        from . import machine
+
+        d["hardware"] = machine.to_dict(hardware)
+    elif hardware_error:
+        d["hardware"] = {"error": hardware_error}
     return d
 
 
-def dump(s: Snapshot, as_json: bool, system=None, system_error: str | None = None) -> str:
-    """system: an optional host.HostSample (OS-reported system RAM/CPU); system_error: why it is missing."""
+def dump(s: Snapshot, as_json: bool, system=None, system_error: str | None = None, hardware=None,
+         hardware_error: str | None = None) -> str:
+    """system: an optional host.HostSample (OS-reported system RAM/CPU); system_error: why it is missing.
+    hardware: an optional machine.HardwareSample (--hardware); hardware_error: why it is missing."""
     from . import host as hostmod
 
     if as_json:
-        return json.dumps(to_json_dict(s, system, system_error), indent=2, default=str)
+        return json.dumps(to_json_dict(s, system, system_error, hardware, hardware_error), indent=2, default=str)
     text = to_text(s)
     if system is not None:
-        return text + "\n\n" + hostmod.to_text(system)
-    return text + (f"\n\nSystem RAM/CPU unavailable: {system_error}" if system_error else "")
+        text += "\n\n" + hostmod.to_text(system)
+    elif system_error:
+        text += f"\n\nSystem RAM/CPU unavailable: {system_error}"
+    if hardware is not None:
+        from . import machine
+
+        text += "\n\n" + machine.to_text(hardware)
+    elif hardware_error:
+        text += f"\n\nHardware telemetry unavailable: {hardware_error}"
+    return text

@@ -19,6 +19,8 @@ from textual.worker import get_current_worker
 
 from .collector import BACKEND, Collector, ProcRow, Snapshot, enumerate_adapters, ordered_adapters
 from .host import HostSample, HostSampler
+from .hwview import HardwareHistory, HardwareScreen, sensor_summary
+from .machine import HardwareSample, HardwareSampler
 from .llm import gb, redact_cmdline
 from .nvml import NvDevice, format_metric
 from .recovery import LiveCollectors
@@ -139,7 +141,18 @@ it is never GPU bytes and never added to a GPU total. `n/a` means the OS wouldn'
 row seen from WSL); `…` means one more sample is needed. Inside WSL they describe the Linux VM.
 `--no-system` hides them.
 
-Keys: `↑/↓` select · `s` sort · `c` chart · `a` show all · `p` pause · `?` this help · `q` quit
+**Hardware view** (`h`): CPU, memory, disks, network adapters and hardware sensors (temperatures, fans,
+package power, voltages, clocks), like Task Manager's Performance tab and HWiNFO's sensor list. These are
+machine readings from the OS and the sensors, never GPU bytes and never added to a GPU total; each sensor row
+names its source (`lhm` LibreHardwareMonitor on Windows, `hwmon`/`rapl` on Linux, `battery`). On Windows, CPU
+temperatures, fans and package power need the PawnIO driver (an installer option) and an elevated
+gputaskman (Start menu: *GPU Task Manager (administrator)*). `n/a` means unknown, `…` waits for a second reading,
+and the line under the sensor table says why anything is missing. `f` filters the sensors by kind.
+
+**Updates** (`u`): checks this fork's GitHub releases only when you press it. On an installed copy it downloads
+the matching installer, checks its SHA-256 and runs it; other installs are told how to upgrade.
+
+Keys: `↑/↓` select · `s` sort · `c` chart · `a` show all · `p` pause · `h` hardware · `u` update · `?` this help · `q` quit
 
 All eight trend charts are visible by default. They stack in narrow terminals and
 share rows when there is room. Click the **Charts** dropdown to show all charts or
@@ -212,6 +225,8 @@ class GpuTaskManager(App):
         Binding("a", "toggle_all", "All/Top"),
         Binding("m", "toggle_monitoring", "Slim/Full"),
         Binding("p", "pause", "Pause"),
+        Binding("h", "hardware", "Hardware"),
+        Binding("u", "check_update", "Update"),
         Binding("question_mark", "help", "Explain"),
     ]
     SORTS = [("VRAM", lambda r: -(r.gpu.shown_vram or 0)), ("GPU%", lambda r: -r.gpu.gpu_pct),
@@ -232,9 +247,15 @@ class GpuTaskManager(App):
     CHARTS = tuple(CHART_COLORS)
 
     def __init__(self, gpu_index: int | None = None, interval: float = 1.0, host: bool = True,
-                 system: bool = True) -> None:
+                 system: bool = True, hardware: bool = True, sensors: bool = True) -> None:
         super().__init__()
         self.system = system
+        self.hardware = hardware
+        self.sensors = sensors
+        self.hw_sample: HardwareSample | None = None
+        self.hw_error: str | None = None
+        self._hw_sampler: HardwareSampler | None = None
+        self.hw_history = HardwareHistory()
         self.sorts = self.SORTS + self.SYSTEM_SORTS if system else self.SORTS
         self.host_sample: HostSample | None = None
         self.host_error: str | None = None
@@ -309,6 +330,7 @@ class GpuTaskManager(App):
     def poll(self) -> None:
         worker = get_current_worker()
         self._sample_host()  # the first reading only primes the CPU rates
+        self._sample_hardware()  # and the disk, network and RAPL rates
         if BACKEND == "wddm":
             live = LiveCollectors(self.gpu_index, collector_factory=Collector, discover=enumerate_adapters)
             try:
@@ -317,8 +339,9 @@ class GpuTaskManager(App):
                     if not self.paused:
                         snapshots = live.sample()
                         host = self._sample_host()
+                        hw = self._sample_hardware()
                         if not worker.is_cancelled:
-                            self.call_from_thread(self.apply_all, snapshots, host)
+                            self.call_from_thread(self.apply_all, snapshots, host, hw)
                     worker.cancelled_event.wait(self.interval)
             finally:
                 live.close()
@@ -339,8 +362,9 @@ class GpuTaskManager(App):
                 if not self.paused:
                     snapshots = [collector.sample() for collector in collectors]
                     host = self._sample_host()
+                    hw = self._sample_hardware()
                     if not worker.is_cancelled:
-                        self.call_from_thread(self.apply_all, snapshots, host)
+                        self.call_from_thread(self.apply_all, snapshots, host, hw)
                 worker.cancelled_event.wait(self.interval)
 
     def _sample_host(self) -> HostSample | None:
@@ -357,15 +381,40 @@ class GpuTaskManager(App):
         self.host_error = None
         return host
 
+    def _sample_hardware(self) -> HardwareSample | None:
+        """CPU, disks, network and sensors are extra: a failure shows its reason and never stops GPU sampling."""
+        if not self.hardware:
+            return None
+        try:
+            if self._hw_sampler is None:
+                self._hw_sampler = HardwareSampler(sensors=self.sensors, interval=self.interval)
+            hw = self._hw_sampler.sample()
+        except Exception as error:
+            self.hw_error = f"{type(error).__name__}: {error}"
+            return None
+        self.hw_error = None
+        return hw
+
+    def on_unmount(self) -> None:
+        if self._hw_sampler is not None:
+            self._hw_sampler.close()  # stops the sensor helper
+
     # ------------------------------------------------------------------ rendering
 
     def apply(self, snap: Snapshot) -> None:
         self.apply_all([snap])
 
-    def apply_all(self, snapshots: list[Snapshot], host: HostSample | None = None) -> None:
+    def apply_all(self, snapshots: list[Snapshot], host: HostSample | None = None,
+                  hw: HardwareSample | None = None) -> None:
         if not self.is_running:
             return  # A worker may finish sampling after shutdown has removed the widgets.
         self.host_sample = host  # None after a failed sample: a stale reading is not shown as current
+        self.hw_sample = hw
+        if hw is not None:
+            self.hw_history.add(hw)
+            for screen in self.screen_stack:
+                if isinstance(screen, HardwareScreen):
+                    screen.show(hw)
         self.hist_cpu.append(host.cpu_pct if host else None)
         self.hist_ram.append(100 * host.ram_used / host.ram_total if host and host.ram_total else None)
         for snap in snapshots:
@@ -491,8 +540,9 @@ class GpuTaskManager(App):
         cpu = line("CPU  ")
         cpu.append_text(stacked_bar([(h.cpu_pct, "green3")], 100, width))
         cpu.append_text(cpu_tail)
+        sensors = sensor_summary(self.hw_sample) if self.hw_sample else None
         if self.monitoring:
-            return Group(ram, cpu)
+            return Group(ram, cpu, *([sensors] if sensors else []))
         cores = line("     ")
         for v in h.per_core:
             cores.append(SPARK[min(int(v / 100 * (len(SPARK) - 1) + 0.5), len(SPARK) - 1)],
@@ -513,7 +563,7 @@ class GpuTaskManager(App):
         busy = [p for p in rated if p.cpu_pct >= 0.5]
         # "…" until some process has a CPU reading: no reading yet is not the same as idle
         top_cpu.append("  ".join(f"{p.name} {p.cpu_pct:.0f}%" for p in busy) if busy else "idle" if rated else "…")
-        return Group(ram, cpu, cores, hist, top_ram, top_cpu)
+        return Group(ram, cpu, cores, hist, top_ram, top_cpu, *([sensors] if sensors else []))
 
     def render_device(self, s: Snapshot) -> Group:
         nv = s.nv
@@ -944,3 +994,17 @@ class GpuTaskManager(App):
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen())
+
+    def action_hardware(self) -> None:
+        if not self.hardware:
+            self.notify("The hardware view is off (--no-hardware).", severity="warning")
+            return
+        screen = HardwareScreen(self.hw_history)
+        if self.hw_sample is not None:
+            screen.sample = self.hw_sample
+        self.push_screen(screen)
+
+    def action_check_update(self) -> None:
+        from .updateview import UpdateScreen
+
+        self.push_screen(UpdateScreen())

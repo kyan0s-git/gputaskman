@@ -48,15 +48,28 @@ or `pipx upgrade gputaskman`. For Windows without Python, use the portable downl
 
 Each tagged release also publishes `gputaskman-VERSION-windows-x64-setup.exe` (Intel/AMD) and
 `gputaskman-VERSION-windows-arm64-setup.exe` (native ARM64). The installer wraps the same frozen
-build as the portable ZIP, so the interface is unchanged: the full-screen terminal UI. It installs
-per user by default (no administrator prompt; the wizard can switch to all users), adds a Start
-menu entry that opens the monitor in your default terminal (Windows Terminal on Windows 11), a
-one-shot report shortcut, and optionally a desktop shortcut and a PATH entry so `gputaskman` and
-`gtm` work in any terminal. Uninstall from Settings > Apps. Silent install:
-`gputaskman-VERSION-windows-x64-setup.exe /VERYSILENT /CURRENTUSER`.
-It bundles no drivers, and like the ZIP it is **unsigned**, so SmartScreen may warn. The setup
-program and its `.sha256` file are validated by the release workflow (silent install, run, uninstall)
-on hosted runners; it has not been checked on a Windows machine with a GPU.
+build as the portable ZIP. It installs per user by default (no administrator prompt; the wizard can
+switch to all users) and adds:
+
+- **GPU Task Manager** in the Start menu: a windowless launcher (`GPU Task Manager.exe`) that opens the TUI
+  in a console window of its own, with its own title, icon, font and size, instead of a shell. Closing the
+  window closes the app. The launcher starts `conhost.exe` explicitly, so this works the same when Windows
+  Terminal is the default terminal; QuickEdit is turned off in that window so clicks reach the TUI.
+- **GPU Task Manager (administrator)**: the same, elevated through UAC, which the sensor helper needs for CPU
+  temperatures, fans and package power.
+- a one-shot report shortcut, and optionally a desktop shortcut and a PATH entry so `gputaskman` and `gtm`
+  work in any terminal.
+- an optional, preselected **sensor driver** task: it runs the official PawnIO setup (pinned version, SHA-256
+  checked at build time) to install the signed PawnIO driver that LibreHardwareMonitor uses. It asks for
+  administrator approval, is skipped when PawnIO is already installed, and is left in place on uninstall
+  because other monitoring tools share it (remove it from Settings > Apps > PawnIO).
+
+Uninstall from Settings > Apps. Silent install:
+`gputaskman-VERSION-windows-x64-setup.exe /VERYSILENT /CURRENTUSER` (add `/TASKS=addtopath,sensordriver`
+to choose tasks). Like the ZIP it is **unsigned**, so SmartScreen may warn. The release workflow validates
+the setup program on hosted runners (silent install with the driver task, `--json --hardware`, the launcher
+starting the app, uninstall). **Not validated on hardware:** the launcher's window on a real desktop, and
+sensor coverage on physical machines (hosted runners are VMs with few sensors).
 
 ## Portable Windows download
 
@@ -487,6 +500,11 @@ uv run --locked gputaskman diff before.json after.json   # compare two --json sn
 uv run --locked gputaskman record -o session.jsonl --duration 300   # append one --json snapshot per second for 5 minutes
 uv run --locked gputaskman --no-host    # WSL: don't read Windows host counters through interop
 uv run --locked gputaskman --no-system  # don't sample system RAM/CPU: no panel, columns, or JSON section
+uv run --locked gputaskman --once --hardware   # add CPU, memory, disks, network and sensors (also with --json)
+uv run --locked gputaskman --no-hardware       # TUI without the hardware view and sensor line
+uv run --locked gputaskman --no-sensors        # skip hardware sensors (Windows: don't start the sensor helper)
+uv run --locked gputaskman --check-update      # is a newer release out? (one request, only when asked)
+uv run --locked gputaskman update              # check, then download, verify and install (Windows installer builds)
 uv run --locked gputaskman --help
 ```
 
@@ -498,6 +516,8 @@ uv run --locked gputaskman --help
 | `a` | Switch between top and all collected processes |
 | `m` | Toggle full diagnostics / slim monitoring |
 | `p` | Pause / resume collection |
+| `h` | Hardware view: CPU, memory, disks, network, sensors (`f` filters sensors, `Esc` returns) |
+| `u` | Check for an update (and install it on an installed Windows copy) |
 | `?` | Explain the counters and their limits |
 | Escape | Close help |
 | `q` | Quit |
@@ -673,6 +693,59 @@ Live checks: Windows 11 on the RTX 4080 SUPER machine with 995 processes (the pr
 same process; the TUI and `--json` ran), and Linux under WSL2 on the same machine (totals matched `/proc/meminfo`,
 gputaskman's own resident size matched `VmRSS` within 1%, and a single busy thread read 3.12% of the machine
 against the expected 100/32 = 3.1%). **Not validated on hardware:** macOS, Windows on ARM64, and bare-metal Linux.
+
+### Hardware view
+
+`h` opens a second screen in the spirit of Task Manager's Performance tab and HWiNFO's sensor list:
+
+| Panel | Shows | Source |
+|---|---|---|
+| CPU | model, total and per-thread load, current speed, headline temperature and package power with 60 s trends, processes, threads, handles (Windows), uptime, load average (Linux/macOS) | psutil; Windows speed is Task Manager's own `% Processor Performance` x base clock (psutil reports only the base clock there) |
+| Memory | in use, available, cached, committed / commit limit, swap or pagefile | psutil; Windows performance counters (standby + modified lists for *cached*); `/proc/meminfo` |
+| Disks | read and write rate per physical disk, active time, volume free space | psutil; Windows `% Idle Time` (Task Manager's active time); Linux `busy_time`. Optical and network drives are skipped (an empty drive errors, a share can hang) |
+| Network | download and upload rate per adapter (bits/s), link speed, IPv4 addresses | psutil |
+| Sensors | every temperature, fan, power, voltage, current, clock, load and level reading, grouped by chip, with session min/max | Windows: LibreHardwareMonitor (`lhm`); Linux: `hwmon`, RAPL (`rapl`), batteries; macOS: battery only |
+
+All of it is machine telemetry as the OS or the sensor reports it: never GPU bytes, never added to a GPU total,
+and ignored by `diff`. Unknown values are `n/a` (`null` in JSON), a measured zero stays `0`, and every rate shows
+`…` until its second reading. The line under the sensor table says what is missing and why. The main view's
+System panel gains one line with the CPU temperature, package power and spinning fans when they are known.
+
+**Windows sensors.** CPU, motherboard (Super I/O fans and voltages) and memory sensors need ring-0 access. The
+installer and the portable ZIP include `sensors\gputaskman-sensors.exe`, a small .NET Framework helper that hosts
+[LibreHardwareMonitorLib](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) 0.9.6 and prints its
+readings as JSON lines; gputaskman starts it, reads it, and stops it by closing its input. The library reaches the
+hardware through the **PawnIO** driver (not the old WinRing0 driver, which Microsoft's vulnerable-driver blocklist
+blocks), so full coverage needs PawnIO installed (the installer's sensor-driver task) *and* an elevated gputaskman
+(the "(administrator)" shortcut). Without them the helper still reports what it can reach unprivileged (GPU and
+storage sensors on many machines) and the notes say what is missing. The helper only reads; it never sets fan
+speeds or clocks. A pip/uv install has no helper and shows only what psutil can (battery). **This changes the
+"look, don't touch" stance for this one feature:** LibreHardwareMonitor probes Super I/O, SMBus and embedded
+controllers to find sensors, which is hardware access, not process access. `--no-sensors` keeps the helper off.
+
+**Linux sensors** come from the kernel's own drivers: `/sys/class/hwmon` (k10temp, coretemp, nct67xx, NVMe,
+amdgpu, ...), RAPL energy counters in `/sys/class/powercap` (power is the rate between readings; the counters are
+root-only on current kernels, and the notes say so), and `/sys/class/power_supply`. Containers and VMs usually
+expose no hwmon sensors.
+
+`--once --hardware` and `--json --hardware` add a `hardware` section (`cpu`, `memory`, `disks`, `volumes`,
+`network`, `sensors`, `sensor_source`, `notes`, `cost_ms`); one-shot takes its rates across the second it already
+waits for GPU engine rates, and on Windows runs the sensor helper once (up to 20 s for its first reading).
+Without `--hardware` the JSON is unchanged.
+
+Validated: the hardware view, `--once --hardware` and `--json --hardware` in a Linux container (no hwmon sensors
+there; hwmon and RAPL parsing is covered by tests against recorded sysfs layouts). **Not validated on hardware:**
+LibreHardwareMonitor readings on a physical Windows PC, PawnIO driver behaviour on HVCI-enabled systems, macOS,
+and Linux hwmon on bare metal.
+
+### Updates
+
+`u` in the TUI, `gputaskman --check-update`, or `gputaskman update` asks this project's GitHub releases
+(`kyan0s-git/gputaskman`) whether a newer version exists. Nothing is sent unless you ask: one HTTPS GET with a
+generic User-Agent. An installed Windows copy can update itself: it downloads the matching `-setup.exe`, checks it
+against the release's `.sha256` file, starts it silently, closes, and the installer reopens the new version.
+The checksum catches corrupted or truncated downloads; the builds are unsigned, so it does not prove who built
+the file. Portable copies and pip/uv installs are told what to download or run instead.
 
 ### Comparing snapshots
 
@@ -952,6 +1025,9 @@ Identification is designed to stay cheap. Measured on one Windows machine:
 | Local API probes | ms, local only | llama-server `/v1/models` only when its model path changes |
 | vLLM `/v1/models` | 1.32 ms median, 21.36 ms max in 30 loopback fixture GETs; cached lookup ~0.0004 ms (Windows 11 build 28000, ARM64; no vLLM runtime/GPU workload) | One GET, 0.5 s timeout and 4 MiB response cap; success cached 3 s, misses/401 cached 30 s. No redirects; actual Linux/vLLM latency unmeasured |
 | `psutil.open_files()` | 0.6-2.5 s per process | Never |
+| Hardware view: CPU, memory, disks, network, Linux hwmon/RAPL | 1.2-2.4 ms per refresh (Linux container, 4 threads, 6 virtual disks, no hwmon sensors); Windows unmeasured | Every refresh while the TUI runs, unless `--no-hardware`; volumes and addresses every 5 s |
+| Windows sensor helper (LibreHardwareMonitor) | Unmeasured on hardware; runs in its own process, so the TUI only parses one JSON line per refresh | One helper per TUI session, updating every refresh interval; `--once --hardware` runs it once (up to 20 s) |
+| Update check | One HTTPS GET, 15 s timeout | Only when asked (`u`, `--check-update`, `gputaskman update`) |
 | AMD and Intel on Linux: DRM fdinfo scan (`readlink` every fd, read fdinfo of `/dev/dri` ones) | ~9 ms for ~8,000 fds (AMD, Linux desktop; Intel not measured) | Every refresh, only when an amdgpu or Intel card is shown; listing fds is bounded to 50 ms in the TUI and resumes next refresh, known GPU fds are still read |
 | Ascend on Linux: `npu-smi` | Contributor reports ~0.5 s per command on an Atlas 300I Duo; not independently measured | Discovery is cached for 120 s. Each selected chip runs one `info` and one `proc-mem` command every 10 s and owns a watch process; multiple selected chips add their synchronous command costs |
 | Intel on Linux: performance counters + RAPL uncore (root only) | ~0.04 ms for the counters, ~0.11 ms for RAPL per refresh on the Vivobook (30 reads each) | Every refresh, only when an Intel card is shown and the counters opened; first refresh arms the baselines |
@@ -1019,7 +1095,8 @@ They validate these examples, not every model architecture or backend.
 ## Privacy and troubleshooting
 
 The monitor reads local process metadata, compatible model headers, load logs, and local server
-responses. It does not dump model weights or send telemetry. **The normal inspector and JSON
+responses. It does not dump model weights or send telemetry. Its only network request is the update check,
+made only when you ask for it. **The normal inspector and JSON
 output can contain paths, command-line flags, model names, and local ports. Review and redact
 captures before posting them publicly.** The screenshot helper omits command lines and full
 file paths, but model and process names still require review.
