@@ -713,6 +713,21 @@ class HandyTests(unittest.TestCase):
         self.assertIn("not current GPU residency", to_text(s))
         self.assertEqual(to_dict(s)["processes"][0]["handy"]["last_event"], "loaded")
 
+    def test_handy_evidence_paths_are_truncated_to_filename(self):
+        for path in (r"C:\Users\Handy\models\whisper.bin", "/models/whisper.bin", "whisper.bin"):
+            with self.subTest(path=path):
+                last_log = ProcRow(
+                    10, "handy.exe", "AI", ProcGpu(dedicated=GiB), ProcDetail(10, "handy.exe"),
+                    handy=HandyEvidence(last_model=path, last_event="loaded"),
+                )
+                self.assertEqual(last_log.inside, "Handy last log (loaded): whisper.bin")
+
+                selected = ProcRow(
+                    10, "handy.exe", "AI", ProcGpu(dedicated=GiB), ProcDetail(10, "handy.exe"),
+                    handy=HandyEvidence(selected_model=path),
+                )
+                self.assertEqual(selected.inside, "Handy selected (not load proof): whisper.bin")
+
 
 class PathArgumentTests(unittest.TestCase):
     def setUp(self):
