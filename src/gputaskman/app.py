@@ -874,7 +874,7 @@ class GpuTaskManager(App):
                 for m in sv.models[:4]:
                     if sv.kind == "lmstudio":
                         st.append(f"\n  loaded: {m['name']} {m.get('type') or ''} {m.get('quant') or ''} ctx {m.get('ctx') or '?'}")
-                    elif sv.kind == "vllm":
+                    elif sv.kind in ("vllm", "foundry-local"):
                         st.append(f"\n  API-reported model ID: {m['name']}")
                 out.append(st)
             for n in v.notes:

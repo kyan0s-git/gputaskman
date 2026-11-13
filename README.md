@@ -807,6 +807,7 @@ reading is NVML's memory-activity percentage, **not measured bandwidth in GB/s**
 | Ollama | Bundled runners, mapped GGUF blobs named from Ollama manifests (`qwen3:14b`), parent `/api/ps`, compatible `server.log`; exercised live |
 | LM Studio | Mapped files named from its models folder, `/api/v1/models` (falls back to `/api/v0/models`); tested with fixture responses, not yet end to end |
 | vLLM | Recognized launch/worker signatures; `/v1/models` identifiers from an own listener or a verified parent, labelled API-reported, never worker residency or memory placement. Fixture-tested, including a real lightweight child process and HTTP listener; live Linux single-GPU and TP hardware **not validated** |
+| Foundry Local | Recognized `foundrylocald` daemon; `/models/loaded` IDs from its own listener, labelled API-reported. No catalog-as-loaded fallback, model byte estimates or per-GPU placement claim. Live-checked with Foundry Local 0.14 on Snapdragon; see below |
 | stable-diffusion.cpp (`--diffusion-model`) | Diffusion, text-encoder and VAE files from launch arguments; no LLM memory breakdown |
 | Hugging Face cache | `models--org--repo` paths are named `org/repo` |
 | Other AI runtimes | DLL detection, plus model files installed with the app (marked *not proven loaded*) |
@@ -837,6 +838,24 @@ when applicable. JSON has `llm.server_source` (`"process"`, `"parent"`, or `null
 `llm.server.models[].name`. A reported ID is not a model file or evidence that a worker holds
 that model; it adds no weights, KV-cache, context-size or GPU-placement estimate. Measured memory
 and attributed totals are unchanged.
+
+Foundry Local discovery requires the exact daemon name (`foundrylocald.exe` or `foundrylocald`),
+a known process creation time and one exclusively owned listening port. Only that process's
+`GET /models/loaded` is queried; parent processes, shared/multiple listeners and redirects are
+not followed. `/v1/models` lists the catalog, not loaded models, so it is never used as loading
+evidence. The table, inspector, text and JSON label returned IDs as API-reported, even when no
+model file is mapped or GPU memory counters are unavailable. CPU/NPU models may also be loaded;
+the list does not prove which GPU holds an individual model. No model files, weight sizes or
+KV-cache estimates are invented from these IDs.
+
+Live identification check: Windows 11 ARM64 build 28000.3231 on a Snapdragon X2 Elite with
+Qualcomm Adreno X2-85, driver 32.0.163.2 (WDDM 3.2), Foundry Local 0.14.0. The running daemon's
+own loaded-model endpoint returned `Phi-3.5-mini-instruct-generic-gpu:2`, matching
+`foundry model list --loaded --output json` (WebGPU execution provider). gputaskman displayed the
+same ID with `server_source: "process"` and unknown model sizes/context left `null`.
+This was a read-only check of an already-loaded model, not an inference or active-engine test.
+Qualcomm's local-versus-shared process-memory accounting remains unresolved and is unchanged
+by model identification; do not treat these process-local bytes as verified dedicated VRAM.
 
 GPU-backed WinML and Studio Effects paths have **not been validated on a Copilot+ PC**. A future
 hardware check should compare idle versus active workload samples, record the actual GPU adapter
@@ -937,6 +956,7 @@ Identification is designed to stay cheap. Measured on one Windows machine:
 | GGUF header, model-store manifests | ms, cached | Once per file / every 60 s |
 | Local API probes | ms, local only | llama-server `/v1/models` only when its model path changes |
 | vLLM `/v1/models` | 1.32 ms median, 21.36 ms max in 30 loopback fixture GETs; cached lookup ~0.0004 ms (Windows 11 build 28000, ARM64; no vLLM runtime/GPU workload) | One GET, 0.5 s timeout and 4 MiB response cap; success cached 3 s, misses/401 cached 30 s. No redirects; actual Linux/vLLM latency unmeasured |
+| Foundry Local `/models/loaded` | 7.37 ms median, 15.93 ms max in 10 warm reads; first read 9.04 ms (Windows 11 ARM64 build 28000.3231, Snapdragon X2 Elite / Adreno X2-85, driver 32.0.163.2, Foundry Local 0.14.0 with Phi-3.5-mini loaded) | One GET to the daemon's own listener, 0.5 s timeout and 4 MiB response cap; success cached 3 s, misses/401 cached 30 s. No redirects, catalog requests or inference |
 | `psutil.open_files()` | 0.6-2.5 s per process | Never |
 | AMD and Intel on Linux: DRM fdinfo scan (`readlink` every fd, read fdinfo of `/dev/dri` ones) | ~9 ms for ~8,000 fds (AMD, Linux desktop; Intel not measured) | Every refresh, only when an amdgpu or Intel card is shown; listing fds is bounded to 50 ms in the TUI and resumes next refresh, known GPU fds are still read |
 | Ascend on Linux: `npu-smi` | Contributor reports ~0.5 s per command on an Atlas 300I Duo; not independently measured | Discovery is cached for 120 s. Each selected chip runs one `info` and one `proc-mem` command every 10 s and owns a watch process; multiple selected chips add their synchronous command costs |
