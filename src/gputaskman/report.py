@@ -275,7 +275,8 @@ def to_text(s: Snapshot, limit: int = 30) -> str:
             out.append(f"   {gb(seg.bytes):>9}  {seg.label}{'' if seg.exact else ''}")
         if p.llm.server:
             sv = p.llm.server
-            out.append(f"   server: {sv.kind} {sv.url} ctx={sv.n_ctx} slots={sv.slots_busy}/{sv.slots_total}"
+            kv = f" KV={sv.kv_cache_usage * 100:.1f}%" if sv.kv_cache_usage is not None else ""
+            out.append(f"   server: {sv.kind} {sv.url} ctx={sv.n_ctx} slots={sv.slots_busy}/{sv.slots_total}{kv}"
                        + (f" gen={sv.gen_tok_s:.1f} tok/s" if sv.gen_tok_s is not None else ""))
             if p.llm.server_source == "parent":
                 out.append("   server source: parent process (API report, not worker residency)")

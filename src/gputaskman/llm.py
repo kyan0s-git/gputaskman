@@ -201,6 +201,9 @@ class ServerInfo:
     prompt_tok_s: float | None = None
     model_path: str | None = None  # llama-server: the file it says it loaded
     models: list[dict] = field(default_factory=list)  # normalized: name, type, quant, ctx, size, size_vram, path
+    requests_running: int | None = None
+    requests_waiting: int | None = None
+    kv_cache_usage: float | None = None  # fraction 0-1 of KV-cache pool, not of GPU memory
 
 
 def _metric(text: str, name: str) -> float | None:
@@ -306,10 +309,20 @@ def probe_server(port: int, prev: ServerInfo | None = None, key: str | None = No
         if isinstance(slots, list):
             s.slots_total = len(slots)
             s.slots_busy = sum(1 for x in slots if x.get("is_processing"))
+            s.requests_running = s.slots_busy
         metrics = _get(base + "/metrics", key=key)
         if isinstance(metrics, str):
             s.gen_tok_s = _metric(metrics, "predicted_tokens_seconds")
             s.prompt_tok_s = _metric(metrics, "prompt_tokens_seconds")
+            kv_ratio = _metric(metrics, "kv_cache_usage_ratio")
+            if kv_ratio is not None and 0.0 <= kv_ratio <= 1.0:
+                s.kv_cache_usage = kv_ratio
+            req_proc = _metric(metrics, "requests_processing")
+            if req_proc is not None and req_proc >= 0 and req_proc.is_integer():
+                s.requests_running = int(req_proc)
+            req_def = _metric(metrics, "requests_deferred")
+            if req_def is not None and req_def >= 0 and req_def.is_integer():
+                s.requests_waiting = int(req_def)
         return s
     ps = _get(base + "/api/ps")
     if isinstance(ps, dict) and isinstance(ps.get("models"), list):

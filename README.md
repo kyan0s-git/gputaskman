@@ -806,7 +806,7 @@ reading is NVML's memory-activity percentage, **not measured bandwidth in GB/s**
 
 | Runtime | Current support |
 |---|---|
-| llama.cpp / llama-server | GGUF discovery, CLI settings, buffer logs, `/props` + `/v1/models` state; exercised live |
+| llama.cpp / llama-server | GGUF discovery, CLI settings, buffer logs, `/props` + `/v1/models` state, slots, and `/metrics` throughput and KV-cache pool usage; exercised live |
 | Ollama | Bundled runners, mapped GGUF blobs named from Ollama manifests (`qwen3:14b`), parent `/api/ps`, compatible `server.log`; exercised live |
 | LM Studio | Mapped files named from its models folder, `/api/v1/models` (falls back to `/api/v0/models`); tested with fixture responses, not yet end to end |
 | vLLM | Recognized launch/worker signatures; `/v1/models` identifiers from an own listener or a verified parent, labelled API-reported, never worker residency or memory placement. Fixture-tested, including a real lightweight child process and HTTP listener; live Linux single-GPU and TP hardware **not validated** |

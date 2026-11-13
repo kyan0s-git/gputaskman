@@ -1313,6 +1313,66 @@ class IdentityTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_llama_server_metrics_and_kv_cache(self):
+        import http.server
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/props":
+                    body = json.dumps({"model_path": "/m/test.gguf", "total_slots": 4,
+                                       "default_generation_settings": {"n_ctx": 8192}}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(body)
+                elif self.path == "/slots":
+                    body = json.dumps([{"id": 0, "is_processing": True}, {"id": 1, "is_processing": False},
+                                       {"id": 2, "is_processing": False}, {"id": 3, "is_processing": False}]).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(body)
+                elif self.path == "/metrics":
+                    text = ("llamacpp:prompt_tokens_seconds 150.0\n"
+                            "llamacpp:predicted_tokens_seconds 35.5\n"
+                            "llamacpp:kv_cache_usage_ratio 0.425\n"
+                            "llamacpp:requests_processing 1\n"
+                            "llamacpp:requests_deferred 2\n")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain")
+                    self.end_headers()
+                    self.wfile.write(text.encode())
+                elif self.path == "/v1/models":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"data": []}')
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        port = server.server_address[1]
+        try:
+            s = probe_server(port)
+            self.assertIsNotNone(s)
+            self.assertEqual(s.kind, "llama-server")
+            self.assertEqual(s.n_ctx, 8192)
+            self.assertEqual(s.slots_total, 4)
+            self.assertEqual(s.slots_busy, 1)
+            self.assertEqual(s.prompt_tok_s, 150.0)
+            self.assertEqual(s.gen_tok_s, 35.5)
+            self.assertAlmostEqual(s.kv_cache_usage, 0.425)
+            self.assertEqual(s.requests_running, 1)
+            self.assertEqual(s.requests_waiting, 2)
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_api_key_is_not_forwarded_by_a_redirect(self):
         import http.server
         seen: dict[str, list[str | None]] = {"first": [], "other": []}
