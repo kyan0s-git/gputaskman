@@ -376,6 +376,50 @@ class MemoryTests(unittest.TestCase):
         Console(file=output, width=160).print(GpuTaskManager().render_device(s))
         self.assertNotIn("free 128 MB", output.getvalue())
 
+    def test_integrated_wddm_small_local_process_is_not_filtered_after_remap(self):
+        adapter = Adapter(1, "Qualcomm Adreno", 0x4D4F4351, 128 * MiB, 8 * GiB, False)
+        c = Collector.__new__(Collector)
+        c.adapter = adapter
+        c.adapters = [adapter]
+        c.gpu_index, c.scan_budget, c.host, c.host_status = 0, None, None, ""
+        c.nvml = Mock(ok=False)
+        c.counters = Mock(outside={})
+        c.counters.sample.return_value = (
+            {1: {
+                42: ProcGpu(dedicated=5 * MiB, shared=0),
+                43: ProcGpu(dedicated=0, shared=5 * MiB),
+            }},
+            {1: AdapterGpu(dedicated=0, shared=10 * MiB)})
+        c.inspector, c.prober = Mock(), Mock()
+        c.inspector.get.side_effect = lambda pid: ProcDetail(pid, f"process-{pid}.exe")
+
+        with patch("gputaskman.collector.BACKEND", "wddm"):
+            s = c.sample()
+
+        self.assertEqual([row.pid for row in s.procs], [42])
+        self.assertEqual((s.procs[0].gpu.dedicated, s.procs[0].gpu.shared), (0, 5 * MiB))
+
+    def test_integrated_wddm_missing_nonlocal_counter_stays_unknown(self):
+        adapter = Adapter(1, "Qualcomm Adreno", 0x4D4F4351, 128 * MiB, 8 * GiB, False)
+        c = Collector.__new__(Collector)
+        c.adapter = adapter
+        c.adapters = [adapter]
+        c.gpu_index, c.scan_budget, c.host, c.host_status = 0, None, None, ""
+        c.nvml = Mock(ok=False)
+        c.counters = Mock(outside={})
+        c.counters.sample.return_value = (
+            {1: {42: ProcGpu(dedicated=5 * MiB, shared=0, available={"dedicated", "committed", "engine"})}},
+            {1: AdapterGpu(dedicated=0, shared=5 * MiB)})
+        c.inspector, c.prober = Mock(), Mock()
+        c.inspector.get.return_value = ProcDetail(42, "process.exe")
+
+        with patch("gputaskman.collector.BACKEND", "wddm"):
+            s = c.sample()
+
+        self.assertEqual([row.pid for row in s.procs], [42])
+        self.assertNotIn("shared", s.procs[0].gpu.available)
+        self.assertIsNone(to_dict(s)["processes"][0]["shared_bytes"])
+
     def test_lost_nvml_telemetry_is_explained_not_silent(self):
         c = Collector.__new__(Collector)
         c.adapter = Adapter(1, "RTX 3060", 0x10DE, 12 * GiB, 0, False, (5, 0, 0))
