@@ -85,7 +85,8 @@ class ProcRow:
                 return f"Handy last log ({self.handy.last_event}): {self.handy.last_model.rsplit('/', 1)[-1]}"
             if self.handy.selected_model:
                 return f"Handy selected (not load proof): {self.handy.selected_model.rsplit('/', 1)[-1]}"
-        if self.llm and self.llm.server and self.llm.server.kind == "vllm" and self.llm.server.models:
+        if (self.llm and self.llm.server and self.llm.server.kind in ("vllm", "foundry-local")
+                and self.llm.server.models):
             source = "parent API" if self.llm.server_source == "parent" else "API"
             return f"reported ({source}): " + ", ".join(m["name"] for m in self.llm.server.models)
         if self.llm and self.llm.models:
@@ -202,8 +203,13 @@ def _llm_wanted(row, shared_is_spill: bool) -> bool:
     """Whether a process row gets an LLM breakdown: an AI-kind process with models (or kind LLM),
     not diffusion, and with measured GPU memory. Where spilled system memory is a counter of its own
     (WDDM, discrete DRM cards) both the dedicated and shared counters must be present; on an integrated
-    GPU system memory is the memory and there is no spill counter, so dedicated alone suffices."""
-    if row.detail.is_diffusion or row.kind not in AI_KINDS or not (row.detail.has_model_evidence or row.kind == "LLM"):
+    GPU system memory is the memory and there is no spill counter, so dedicated alone suffices.
+    Foundry Local can report loaded IDs even when memory counters and model files are unavailable."""
+    if row.detail.is_diffusion:
+        return False
+    if row.detail.foundry_local:
+        return True  # Loaded-model identity does not require memory counters or a mapped file.
+    if row.kind not in AI_KINDS or not (row.detail.has_model_evidence or row.kind == "LLM"):
         return False
     need = {"dedicated", "shared"} if shared_is_spill else {"dedicated"}
     return need <= row.gpu.available
@@ -455,11 +461,17 @@ class Collector:
             if not _llm_wanted(row, snap.shared_is_spill):
                 continue
             ports = self.inspector.exclusive_ports(row.pid)
-            key = api_key(row.detail.cmdline)
+            foundry = row.detail.foundry_local
+            key = None if foundry else api_key(row.detail.cmdline)
             vllm = bool(row.detail.vllm_role)
-            kind = "vllm" if vllm else None
+            kind = "foundry-local" if foundry else "vllm" if vllm else None
             own_origin = ("process", row.pid, row.detail.create_time)
-            if vllm and (row.detail.vllm_ambiguous or len(ports) > 1 or
+            if foundry:
+                parent_ports = []
+                if (not row.detail.create_time or len(ports) != 1
+                        or set(ports) != set(row.detail.ports)):
+                    ports = []
+            elif vllm and (row.detail.vllm_ambiguous or len(ports) > 1 or
                          set(ports) != set(row.detail.ports)):
                 ports = []
                 parent_ports = []

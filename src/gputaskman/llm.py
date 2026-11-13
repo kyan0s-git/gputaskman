@@ -3,7 +3,8 @@
 Evidence, best first:
   1. llama.cpp / Ollama load logs  -> exact per-device buffer sizes
   2. Local server endpoints        -> llama-server /props,/v1/models,/slots,/metrics; Ollama /api/ps;
-                                      LM Studio /api/v1/models (falls back to /api/v0/models)
+                                      LM Studio /api/v1/models (falls back to /api/v0/models);
+                                      Foundry Local /models/loaded (loaded IDs only)
   3. GGUF header + command line    -> estimates (weights per layer, KV bytes per token x context)
 The process's real VRAM total always comes from Windows, so the remainder is never invented.
 """
@@ -191,7 +192,7 @@ def _get(url: str, timeout: float = 0.5, key: str | None = None, redirects: bool
 
 @dataclass
 class ServerInfo:
-    kind: str  # llama-server | ollama | lmstudio | vllm
+    kind: str  # llama-server | ollama | lmstudio | vllm | foundry-local
     url: str
     n_ctx: int | None = None
     slots_total: int | None = None
@@ -261,6 +262,13 @@ def vllm_models(response) -> list[dict] | None:
     return [_model_entry(m["id"]) for m in entries]
 
 
+def foundry_models(response) -> list[dict] | None:
+    """Foundry Local's loaded IDs, not its catalog or a per-model memory report."""
+    if not isinstance(response, list) or any(not isinstance(m, str) or not m.strip() for m in response):
+        return None
+    return [_model_entry(m) for m in response]
+
+
 def probe_server(port: int, prev: ServerInfo | None = None, key: str | None = None,
                  kind: str | None = None) -> ServerInfo | None:
     """Read-only GETs. Never calls inference, load or download endpoints.
@@ -269,6 +277,12 @@ def probe_server(port: int, prev: ServerInfo | None = None, key: str | None = No
     so a locked server logs one rejected request per probe instead of one per endpoint.
     """
     base = f"http://127.0.0.1:{port}"
+    if kind == "foundry-local":
+        response = _get(base + "/models/loaded", redirects=False)
+        if response is UNAUTHORIZED:
+            return UNAUTHORIZED
+        models = foundry_models(response)
+        return ServerInfo("foundry-local", base, models=models) if models is not None else None
     if kind == "vllm":
         response = _get(base + "/v1/models", key=key, redirects=False)
         if response is UNAUTHORIZED:
@@ -445,8 +459,14 @@ def build_view(d: ProcDetail, vram: float, shared: float, server: ServerInfo | N
         source = "parent process" if v.server_source == "parent" else "process's own listener"
         v.notes.append(f"vLLM API reported via {source}; model IDs do not prove this process's "
                        "model residency, weights, KV cache or GPU placement.")
+    elif server and server.kind == "foundry-local":
+        v.notes.append("Foundry Local API reports loaded model IDs from this process's own listener, "
+                       "not per-model GPU placement, weights or KV-cache bytes. "
+                       "The loaded list can include CPU and NPU models.")
     elif d.vllm_role and not server:
         v.notes.append("vLLM process signature only; no unambiguous local API association was established.")
+    elif d.foundry_local and not server:
+        v.notes.append("Foundry Local daemon signature only; no unambiguous loaded-model API report is available.")
     files = [dataclasses.replace(m, sources=list(m.sources)) for m in d.models]  # cached details stay untouched
     matched = _merge_api(files, server, host)
     for m in files:
