@@ -248,7 +248,7 @@ def vllm_metrics(text: str, model_ids: list[str]) -> dict[str, int | float | Non
         if not m or m[1] not in _VLLM_GAUGES:
             continue
         labels = _prom_labels(m[2] or "")
-        if labels is None:
+        if labels is None or not labels.get("engine") or not labels.get("model_name"):
             return out  # identity can't be checked
         engines.add(labels.get("engine"))
         names.add(labels.get("model_name"))
