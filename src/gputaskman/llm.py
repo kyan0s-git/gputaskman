@@ -14,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -201,11 +202,82 @@ class ServerInfo:
     prompt_tok_s: float | None = None
     model_path: str | None = None  # llama-server: the file it says it loaded
     models: list[dict] = field(default_factory=list)  # normalized: name, type, quant, ctx, size, size_vram, path
+    # vLLM /metrics gauges: server-level runtime reports for one engine, never per-worker or per-GPU measurements.
+    requests_running: int | None = None
+    requests_waiting: int | None = None
+    kv_cache_usage: float | None = None  # fraction 0-1 of vLLM's own KV-cache pool, not of GPU memory
 
 
 def _metric(text: str, name: str) -> float | None:
     m = re.search(rf"^llamacpp:{name}\s+([\d.eE+-]+)", text, re.M)
     return float(m[1]) if m else None
+
+
+_VLLM_GAUGES = {"vllm:num_requests_running": "requests_running",
+                "vllm:num_requests_waiting": "requests_waiting",
+                "vllm:kv_cache_usage_perc": "kv_cache_usage"}
+_PROM_SAMPLE = re.compile(r"([A-Za-z_:][A-Za-z0-9_:]*)(?:\{(.*)\})?[ \t]+(\S+)(?:[ \t]+-?\d+)?[ \t]*")
+_PROM_LABEL = re.compile(r'[ \t]*([A-Za-z_][A-Za-z0-9_]*)="((?:[^"\\]|\\.)*)"[ \t]*(?:,|$)')
+
+
+def _prom_labels(text: str) -> dict[str, str] | None:
+    labels, pos = {}, 0
+    while pos < len(text):
+        m = _PROM_LABEL.match(text, pos)
+        if not m or m[1] in labels:
+            return None
+        labels[m[1]] = re.sub(r"\\(.)", lambda e: "\n" if e[1] == "n" else e[1], m[2])
+        pos = m.end()
+    return labels
+
+
+def vllm_metrics(text: str, model_ids: list[str]) -> dict[str, int | float | None]:
+    """Three server-level gauges from vLLM's Prometheus text, or unknown for each.
+
+    Accepted only for exactly one engine and one metric model identity. vLLM labels metrics with its first
+    --served-model-name, so that one label must be among the advertised /v1/models IDs (aliases allowed).
+    A reported 0 stays 0; a missing, duplicated, malformed or out-of-range sample stays None.
+    """
+    out: dict[str, int | float | None] = dict.fromkeys(_VLLM_GAUGES.values())
+    samples: dict[str, list[float | None]] = {}
+    engines, names = set(), set()
+    for line in text.splitlines():
+        if not line.startswith("vllm:"):
+            continue
+        m = _PROM_SAMPLE.fullmatch(line)
+        if not m or m[1] not in _VLLM_GAUGES:
+            continue
+        labels = _prom_labels(m[2] or "")
+        if labels is None or not labels.get("engine") or not labels.get("model_name"):
+            return out  # identity can't be checked
+        engines.add(labels.get("engine"))
+        names.add(labels.get("model_name"))
+        try:
+            value = float(m[3])
+        except ValueError:
+            value = None
+        samples.setdefault(m[1], []).append(value if value is not None and math.isfinite(value) else None)
+    if len(engines) != 1 or len(names) != 1 or next(iter(names)) not in model_ids:
+        return out
+    for metric, key in _VLLM_GAUGES.items():
+        values = samples.get(metric, [])
+        value = values[0] if len(values) == 1 else None
+        if value is None:
+            continue
+        if key == "kv_cache_usage":
+            out[key] = value if 0 <= value <= 1 else None
+        else:
+            out[key] = int(value) if value >= 0 and value.is_integer() else None
+    return out
+
+
+def vllm_gauge_text(s: ServerInfo) -> str | None:
+    """One display line for the vLLM gauges, or None when none is known. Unknown shows as n/a, 0 as 0."""
+    if s.kind != "vllm" or all(v is None for v in (s.requests_running, s.requests_waiting, s.kv_cache_usage)):
+        return None
+    running, waiting = ("n/a" if v is None else str(v) for v in (s.requests_running, s.requests_waiting))
+    kv = "n/a" if s.kv_cache_usage is None else f"{s.kv_cache_usage * 100:.1f}%"
+    return f"vLLM /metrics (runtime-reported): requests running {running}, waiting {waiting}, KV-cache pool {kv}"
 
 
 def _model_entry(name, type_=None, quant=None, ctx=None, size=None, size_vram=None, path=None) -> dict:
@@ -288,7 +360,15 @@ def probe_server(port: int, prev: ServerInfo | None = None, key: str | None = No
         if response is UNAUTHORIZED:
             return UNAUTHORIZED
         models = vllm_models(response)
-        return ServerInfo("vllm", base, models=models) if models is not None else None
+        if models is None:
+            return None
+        s = ServerInfo("vllm", base, models=models)
+        # Only after /v1/models succeeds. Never sends a key; a 401 or any failure leaves the gauges unknown.
+        metrics = _get(base + "/metrics", redirects=False)
+        if isinstance(metrics, str):
+            for key, value in vllm_metrics(metrics, [m["name"] for m in models]).items():
+                setattr(s, key, value)
+        return s
     props = _get(base + "/props", key=key)
     if props is UNAUTHORIZED:
         return UNAUTHORIZED
@@ -459,6 +539,10 @@ def build_view(d: ProcDetail, vram: float, shared: float, server: ServerInfo | N
         source = "parent process" if v.server_source == "parent" else "process's own listener"
         v.notes.append(f"vLLM API reported via {source}; model IDs do not prove this process's "
                        "model residency, weights, KV cache or GPU placement.")
+        if vllm_gauge_text(server):
+            v.notes.append("vLLM /metrics gauges describe the API server's engine as a whole, not this process "
+                           "or one GPU; KV-cache pool usage is a share of vLLM's own KV-cache allocation, "
+                           "not of GPU memory.")
     elif server and server.kind == "foundry-local":
         v.notes.append("Foundry Local API reports loaded model IDs from this process's own listener, "
                        "not per-model GPU placement, weights or KV-cache bytes. "

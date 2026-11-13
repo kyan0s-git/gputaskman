@@ -7,7 +7,7 @@ import json
 import os
 
 from .collector import ProcRow, Snapshot
-from .llm import gb
+from .llm import gb, vllm_gauge_text
 from .nvml import format_metric
 from .pdh import ProcGpu
 
@@ -282,6 +282,8 @@ def to_text(s: Snapshot, limit: int = 30) -> str:
             if sv.kind in ("vllm", "foundry-local"):
                 for m in sv.models:
                     out.append(f"   API-reported model ID: {m['name']}")
+            if gauges := vllm_gauge_text(sv):
+                out.append(f"   {gauges}")
         if p.llm.log_source:
             out.append(f"   exact sizes from log: {p.llm.log_source}")
         for n in p.llm.notes:
