@@ -7,7 +7,7 @@ import json
 import os
 
 from .collector import ProcRow, Snapshot
-from .llm import gb
+from .llm import gb, server_gauge_text
 from .nvml import format_metric
 from .pdh import ProcGpu
 
@@ -275,14 +275,15 @@ def to_text(s: Snapshot, limit: int = 30) -> str:
             out.append(f"   {gb(seg.bytes):>9}  {seg.label}{'' if seg.exact else ''}")
         if p.llm.server:
             sv = p.llm.server
-            kv = f" KV={sv.kv_cache_usage * 100:.1f}%" if sv.kv_cache_usage is not None else ""
-            out.append(f"   server: {sv.kind} {sv.url} ctx={sv.n_ctx} slots={sv.slots_busy}/{sv.slots_total}{kv}"
+            out.append(f"   server: {sv.kind} {sv.url} ctx={sv.n_ctx} slots={sv.slots_busy}/{sv.slots_total}"
                        + (f" gen={sv.gen_tok_s:.1f} tok/s" if sv.gen_tok_s is not None else ""))
             if p.llm.server_source == "parent":
                 out.append("   server source: parent process (API report, not worker residency)")
             if sv.kind in ("vllm", "foundry-local"):
                 for m in sv.models:
                     out.append(f"   API-reported model ID: {m['name']}")
+            if gauges := server_gauge_text(sv):
+                out.append(f"   {gauges}")
         if p.llm.log_source:
             out.append(f"   exact sizes from log: {p.llm.log_source}")
         for n in p.llm.notes:
