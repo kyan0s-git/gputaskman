@@ -84,6 +84,9 @@ per-process local usage is shown as Shared RAM, not VRAM, while device dedicated
 separate. This is a DXGI-capacity heuristic. Intel temperature, power, clocks, and memory activity are not
 currently available on Windows. Arc B580 behavior is covered by mocked counters but has not been validated
 on Intel hardware.
+When a Windows telemetry provider does not supply a version, gputaskman reads the selected adapter's
+`DriverVersion` from its exact PnP device's driver registry key. If that value is unavailable, the
+driver remains unknown.
 
 Install [Git for Windows](https://git-scm.com/downloads/win) and
 [uv](https://docs.astral.sh/uv/getting-started/installation/) if needed. With WinGet:
@@ -949,6 +952,7 @@ Identification is designed to stay cheap. Measured on one Windows machine:
 |---|---|---|
 | Process list, command line, listening ports | under 1 ms | Once per process / every 5 s |
 | Windows adapter discovery (DXGI + exact-LUID PnP identity + PCI location, no telemetry sample) | ~0.86 ms median, 2.60 ms max in 30 warm reads, 26.1 ms first/cold call (Windows 11 build 28000, RTX Spark N1X, driver 32.0.16.2114); same machine without the PnP probe: ~0.36 ms median | Once at startup; TUI rediscovery every 5 s. PnP uses fixed buffers, one interface lookup per adapter and at most two name-property reads, no path/device enumeration or retries. Synchronous OS calls are not a hard latency bound. Other drivers, virtual displays and multi-GPU laptops unmeasured; provider reconstruction has additional driver-dependent cost |
+| Windows PnP driver-version lookup | 0.016 ms median, 0.019 ms max in 30 reads; first query 0.044 ms (Windows 11 ARM64 build 28000.3231, Snapdragon X2 Elite / Adreno X2-85, driver 32.0.163.2) | Once when a collector is created; reads the selected adapter's exact PnP `Driver` and `DriverVersion` registry values. Missing values stay unknown; other systems unmeasured |
 | Windows NVML handle reacquisition (no telemetry sample) | ~8.7 ms median, 9.3 ms max in 30 reads (Windows 11 build 26340, RTX 4080 SUPER, NVIDIA 630.20) | Every 5 s per active collector; retries initialization after NVML session-loss errors. Other drivers unmeasured |
 | Windows TCC discovery (NVML init, device count, one driver-model read per GPU, shutdown) | First call in 15 fresh processes on the same machine, one WDDM GPU: median 37.6 ms, 27.8-43.8 ms. About 15 ms of that is the first `nvmlInit` (it loads `nvml.dll`), which NVML readings pay anyway; the added cost is one extra init-to-shutdown cycle, median 20.7 ms (13.3-30.3 ms). Later calls are cached (about 3 µs). A TCC GPU adds PCI, name and memory reads, which are unmeasured (no TCC hardware here) | Once per process on Windows, including `--list-gpus`; never repeated while running |
 | Memory-map scan (DLLs + mapped files) | 1-50 ms per process | New processes, a 64 MiB / 10% memory change, or every 2 min; at most 150 ms per refresh |

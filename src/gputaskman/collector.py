@@ -12,7 +12,8 @@ import psutil
 
 from .amdsmi import AmdSmi, _bdf
 from .adl import Adl
-from .dxgi import VENDOR_AMD, VENDOR_NVIDIA, VENDOR_HUAWEI, VENDOR_INTEL, Adapter
+from .dxgi import (VENDOR_AMD, VENDOR_NVIDIA, VENDOR_HUAWEI, VENDOR_INTEL, Adapter,
+                   adapter_driver_version)
 from .handy import HandyEvidence, inspect_handy
 from .llm import LlmView, ServerProber, api_key, build_view, gb, ollama_log_path
 from . import nvml as nvml_mod
@@ -233,6 +234,8 @@ class Collector:
                  adapters: list[Adapter] | None = None) -> None:
         self.adapters = [a for a in (enumerate_adapters() if adapters is None else adapters) if not a.software]
         self.adapter = select_adapter(self.adapters, gpu_index)
+        self._windows_driver = (adapter_driver_version(self.adapter.device_instance_id)
+                                if BACKEND == "wddm" and self.adapter else "")
         with ExitStack() as resources:
             if isinstance(self.adapter, TccAdapter):  # no Windows counters exist for it: NVML is the source
                 self.nvml = Nvml()
@@ -379,9 +382,11 @@ class Collector:
 
         snap = Snapshot(
             taken=time.time(), adapter=self.adapter, adapters=self.adapters, nv=nv,
-            driver=self._mac_driver or (self.amdsmi.driver if nv and nv.source == "AMD SMI"
-                                        else self.nvml.driver if nv and nv.source == "NVML"
-                                        else f"kernel {os.uname().release}" if nv and nv.source == "AMD sysfs" else ""),
+            driver=(self._mac_driver
+                    or (self.amdsmi.driver if nv and nv.source == "AMD SMI" else "")
+                    or (self.nvml.driver if nv and nv.source == "NVML" else "")
+                    or (f"kernel {os.uname().release}" if nv and nv.source == "AMD sysfs" else "")
+                    or getattr(self, "_windows_driver", "")),
             cuda=self.nvml.cuda_version if nv and nv.source == "NVML" else "", vram_total=total,
             vram_used=int(a.dedicated) if a and a.dedicated is not None else None,
             shared_used=int(a.shared) if a and a.shared is not None else None, backend=self.backend,
