@@ -70,6 +70,24 @@ class Adapter:
                 and self.shared_system > self.dedicated_vram)
 
 
+def adapter_driver_version(device_instance_id: str) -> str:
+    """Read the installed driver version for this exact PnP adapter, or leave it unknown."""
+    if not device_instance_id:
+        return ""
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, rf"SYSTEM\CurrentControlSet\Enum\{device_instance_id}") as device:
+            driver_key, _ = winreg.QueryValueEx(device, "Driver")
+        if not isinstance(driver_key, str) or not driver_key:
+            return ""
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, rf"SYSTEM\CurrentControlSet\Control\Class\{driver_key}") as driver:
+            version, _ = winreg.QueryValueEx(driver, "DriverVersion")
+    except (ImportError, OSError):
+        return ""
+    return version.strip() if isinstance(version, str) else ""
+
+
 def _vcall(obj: ctypes.c_void_p, index: int, restype, *argtypes):
     vtbl = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
     return ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(vtbl[index])

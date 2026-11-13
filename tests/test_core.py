@@ -295,6 +295,21 @@ class MemoryTests(unittest.TestCase):
         self.assertIn("GPU 42%", to_text(s))
         self.assertEqual(to_dict(s)["device"]["util_gpu"], 42)
 
+    def test_windows_pnp_driver_version_fills_missing_telemetry_version(self):
+        c = Collector.__new__(Collector)
+        c.adapter = Adapter(1, "Intel GPU", 0x8086, 12 * GiB, 8 * GiB, False)
+        c.adapters = [c.adapter]
+        c.gpu_index, c.scan_budget, c.host, c.host_status = 0, None, None, ""
+        c._windows_driver = "32.0.163.2"
+        c.nvml = Mock(ok=False)
+        c.counters = Mock(outside={})
+        c.counters.sample.return_value = ({1: {}}, {1: AdapterGpu(util_gpu=41.6)})
+        c.inspector, c.prober = Mock(), Mock()
+        with patch("gputaskman.collector.BACKEND", "wddm"):
+            s = c.sample()
+        self.assertEqual(s.driver, "32.0.163.2")
+        self.assertEqual(to_dict(s)["driver"], "32.0.163.2")
+
     def test_integrated_intel_wddm_keeps_system_memory_out_of_vram(self):
         memory = 776 * MiB
         adapter = Adapter(1, "Intel Iris Xe Graphics", 0x8086, 128 * MiB, 8 * GiB, False)
