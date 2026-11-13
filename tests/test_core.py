@@ -295,6 +295,21 @@ class MemoryTests(unittest.TestCase):
         self.assertIn("GPU 42%", to_text(s))
         self.assertEqual(to_dict(s)["device"]["util_gpu"], 42)
 
+    def test_windows_pnp_driver_version_fills_missing_telemetry_version(self):
+        c = Collector.__new__(Collector)
+        c.adapter = Adapter(1, "Intel GPU", 0x8086, 12 * GiB, 8 * GiB, False)
+        c.adapters = [c.adapter]
+        c.gpu_index, c.scan_budget, c.host, c.host_status = 0, None, None, ""
+        c._windows_driver = "32.0.163.2"
+        c.nvml = Mock(ok=False)
+        c.counters = Mock(outside={})
+        c.counters.sample.return_value = ({1: {}}, {1: AdapterGpu(util_gpu=41.6)})
+        c.inspector, c.prober = Mock(), Mock()
+        with patch("gputaskman.collector.BACKEND", "wddm"):
+            s = c.sample()
+        self.assertEqual(s.driver, "32.0.163.2")
+        self.assertEqual(to_dict(s)["driver"], "32.0.163.2")
+
     def test_integrated_intel_wddm_keeps_system_memory_out_of_vram(self):
         memory = 776 * MiB
         adapter = Adapter(1, "Intel Iris Xe Graphics", 0x8086, 128 * MiB, 8 * GiB, False)
@@ -317,8 +332,8 @@ class MemoryTests(unittest.TestCase):
         self.assertIsNone(s.nv.temp)
         self.assertIsNone(s.nv.power_w)
         self.assertIsNone(s.nv.sm_clock)
-        self.assertTrue(adapter.integrated_intel)
-        self.assertFalse(Adapter(2, "Intel Arc B580", 0x8086, 12 * GiB, 8 * GiB, False).integrated_intel)
+        self.assertTrue(adapter.integrated_gpu)
+        self.assertFalse(Adapter(2, "Intel Arc B580", 0x8086, 12 * GiB, 8 * GiB, False).integrated_gpu)
         gpu = s.procs[0].gpu
         self.assertEqual((gpu.dedicated, gpu.shared), (0, memory))
         data = to_dict(s)
@@ -328,6 +343,82 @@ class MemoryTests(unittest.TestCase):
         self.assertIn("VRAM 0 MB / 128 MB", text)
         self.assertIn("SHARED", text)
         self.assertIn("shared (in system RAM) 776 MB", text)
+
+    def test_qualcomm_wddm_reports_shared_memory_and_engine_activity(self):
+        memory = 45 * GiB
+        adapter = Adapter(1, "Qualcomm Adreno X2-85", 0x4D4F4351, 128 * MiB, 48 * GiB, False)
+        c = Collector.__new__(Collector)
+        c.adapter = adapter
+        c.adapters = [adapter]
+        c.gpu_index, c.scan_budget, c.host, c.host_status = 0, None, None, ""
+        c.nvml = Mock(ok=False)
+        c.counters = Mock(outside={})
+        c.counters.sample.return_value = (
+            {1: {42: ProcGpu(dedicated=memory, shared=0, committed=memory)}},
+            {1: AdapterGpu(dedicated=0, shared=memory, util_gpu=41.6)})
+        c.inspector, c.prober = Mock(), Mock()
+        c.inspector.get.return_value = ProcDetail(42, "example.exe")
+        with patch("gputaskman.collector.BACKEND", "wddm"):
+            s = c.sample()
+
+        self.assertEqual(adapter.vendor, "Qualcomm")
+        self.assertTrue(adapter.integrated_gpu)
+        self.assertEqual((s.vram_total, s.vram_used, s.shared_used), (128 * MiB, 0, memory))
+        self.assertFalse(s.shared_is_spill)
+        self.assertEqual((s.nv.source, s.nv.util_gpu), ("Windows WDDM", 42))
+        self.assertEqual(s.attributed, 0)
+        self.assertEqual((s.procs[0].gpu.dedicated, s.procs[0].gpu.shared), (0, memory))
+        data = to_dict(s)
+        self.assertEqual((data["processes"][0]["vram_bytes"], data["processes"][0]["shared_bytes"]), (0, memory))
+        self.assertIn("VRAM 0 MB / 128 MB", to_text(s))
+        self.assertIn("shared (in system RAM) 45.00 GB", to_text(s))
+        output = io.StringIO()
+        Console(file=output, width=160).print(GpuTaskManager().render_device(s))
+        self.assertNotIn("free 128 MB", output.getvalue())
+
+    def test_integrated_wddm_small_local_process_is_not_filtered_after_remap(self):
+        adapter = Adapter(1, "Qualcomm Adreno", 0x4D4F4351, 128 * MiB, 8 * GiB, False)
+        c = Collector.__new__(Collector)
+        c.adapter = adapter
+        c.adapters = [adapter]
+        c.gpu_index, c.scan_budget, c.host, c.host_status = 0, None, None, ""
+        c.nvml = Mock(ok=False)
+        c.counters = Mock(outside={})
+        c.counters.sample.return_value = (
+            {1: {
+                42: ProcGpu(dedicated=5 * MiB, shared=0),
+                43: ProcGpu(dedicated=0, shared=5 * MiB),
+            }},
+            {1: AdapterGpu(dedicated=0, shared=10 * MiB)})
+        c.inspector, c.prober = Mock(), Mock()
+        c.inspector.get.side_effect = lambda pid: ProcDetail(pid, f"process-{pid}.exe")
+
+        with patch("gputaskman.collector.BACKEND", "wddm"):
+            s = c.sample()
+
+        self.assertEqual([row.pid for row in s.procs], [42])
+        self.assertEqual((s.procs[0].gpu.dedicated, s.procs[0].gpu.shared), (0, 5 * MiB))
+
+    def test_integrated_wddm_missing_nonlocal_counter_stays_unknown(self):
+        adapter = Adapter(1, "Qualcomm Adreno", 0x4D4F4351, 128 * MiB, 8 * GiB, False)
+        c = Collector.__new__(Collector)
+        c.adapter = adapter
+        c.adapters = [adapter]
+        c.gpu_index, c.scan_budget, c.host, c.host_status = 0, None, None, ""
+        c.nvml = Mock(ok=False)
+        c.counters = Mock(outside={})
+        c.counters.sample.return_value = (
+            {1: {42: ProcGpu(dedicated=5 * MiB, shared=0, available={"dedicated", "committed", "engine"})}},
+            {1: AdapterGpu(dedicated=0, shared=5 * MiB)})
+        c.inspector, c.prober = Mock(), Mock()
+        c.inspector.get.return_value = ProcDetail(42, "process.exe")
+
+        with patch("gputaskman.collector.BACKEND", "wddm"):
+            s = c.sample()
+
+        self.assertEqual([row.pid for row in s.procs], [42])
+        self.assertNotIn("shared", s.procs[0].gpu.available)
+        self.assertIsNone(to_dict(s)["processes"][0]["shared_bytes"])
 
     def test_lost_nvml_telemetry_is_explained_not_silent(self):
         c = Collector.__new__(Collector)
@@ -621,6 +712,21 @@ class HandyTests(unittest.TestCase):
         self.assertIn("Handy last log (loaded): model.gguf", s.procs[0].inside)
         self.assertIn("not current GPU residency", to_text(s))
         self.assertEqual(to_dict(s)["processes"][0]["handy"]["last_event"], "loaded")
+
+    def test_handy_evidence_paths_are_truncated_to_filename(self):
+        for path in (r"C:\Users\Handy\models\whisper.bin", "/models/whisper.bin", "whisper.bin"):
+            with self.subTest(path=path):
+                last_log = ProcRow(
+                    10, "handy.exe", "AI", ProcGpu(dedicated=GiB), ProcDetail(10, "handy.exe"),
+                    handy=HandyEvidence(last_model=path, last_event="loaded"),
+                )
+                self.assertEqual(last_log.inside, "Handy last log (loaded): whisper.bin")
+
+                selected = ProcRow(
+                    10, "handy.exe", "AI", ProcGpu(dedicated=GiB), ProcDetail(10, "handy.exe"),
+                    handy=HandyEvidence(selected_model=path),
+                )
+                self.assertEqual(selected.inside, "Handy selected (not load proof): whisper.bin")
 
 
 class PathArgumentTests(unittest.TestCase):
@@ -1222,6 +1328,103 @@ class IdentityTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_llama_server_metrics_and_kv_cache(self):
+        import http.server
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/props":
+                    body = json.dumps({"model_path": "/m/test.gguf", "total_slots": 4,
+                                       "default_generation_settings": {"n_ctx": 8192}}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(body)
+                elif self.path == "/slots":
+                    body = json.dumps([{"id": 0, "is_processing": True}, {"id": 1, "is_processing": False},
+                                       {"id": 2, "is_processing": False}, {"id": 3, "is_processing": False}]).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(body)
+                elif self.path == "/metrics":
+                    text = ("llamacpp:prompt_tokens_seconds 150.0\n"
+                            "llamacpp:predicted_tokens_seconds 35.5\n"
+                            "llamacpp:kv_cache_usage_ratio 0.425\n"
+                            "llamacpp:requests_processing 1\n"
+                            "llamacpp:requests_deferred 2\n")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain")
+                    self.end_headers()
+                    self.wfile.write(text.encode())
+                elif self.path == "/v1/models":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"data": []}')
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        port = server.server_address[1]
+        try:
+            s = probe_server(port)
+            self.assertIsNotNone(s)
+            self.assertEqual(s.kind, "llama-server")
+            self.assertEqual(s.n_ctx, 8192)
+            self.assertEqual(s.slots_total, 4)
+            self.assertEqual(s.slots_busy, 1)
+            self.assertEqual(s.prompt_tok_s, 150.0)
+            self.assertEqual(s.gen_tok_s, 35.5)
+            self.assertAlmostEqual(s.kv_cache_usage, 0.425)
+            self.assertEqual(s.requests_running, 1)
+            self.assertEqual(s.requests_waiting, 2)
+            snap = snapshot()
+            attributed = snap.attributed
+            row = snap.procs[0]
+            row.llm = build_view(row.detail, row.gpu.dedicated, row.gpu.shared, s)
+            text = to_text(snap)
+            self.assertIn("llama-server (runtime-reported): requests running 1, waiting 2, "
+                          "KV-cache pool 42.5%", text)
+            self.assertIn("not of GPU memory", text)
+            self.assertEqual(snap.attributed, attributed)
+            reported = to_dict(snap)["processes"][0]["llm"]["server"]
+            self.assertEqual((reported["requests_running"], reported["requests_waiting"],
+                              reported["kv_cache_usage"]), (1, 2, 0.425))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_llama_server_gauges_keep_zero_and_reject_invalid_values(self):
+        for value, expected in (("0", (0, 0, 0.0)), ("2", (2, 2, None)),
+                                ("1.5", (None,) * 3), ("-1", (None,) * 3),
+                                ("-inf", (None,) * 3), ("NaN", (None,) * 3),
+                                ("1e309", (None,) * 3), ("abc", (None,) * 3)):
+            metrics = "\n".join(f"llamacpp:{name} {value}" for name in
+                                ("requests_processing", "requests_deferred", "kv_cache_usage_ratio"))
+            with self.subTest(value=value), patch("gputaskman.llm._get",
+                    side_effect=[{"model_path": None}, {"data": []}, None, metrics]):
+                server = probe_server(8080)
+            self.assertEqual((server.requests_running, server.requests_waiting, server.kv_cache_usage),
+                             expected)
+
+    def test_llama_server_running_requests_fall_back_to_slots_not_zero(self):
+        for metrics, expected in ((None, 1), ("llamacpp:requests_processing -inf", 1),
+                                  ("llamacpp:requests_processing 0", 0)):
+            with self.subTest(metrics=metrics), patch("gputaskman.llm._get",
+                    side_effect=[{"model_path": None}, {"data": []},
+                                 [{"is_processing": True}], metrics]):
+                server = probe_server(8080)
+            self.assertEqual(server.slots_busy, 1)
+            self.assertEqual(server.requests_running, expected)
+            self.assertIsNone(server.requests_waiting)
+            self.assertIsNone(server.kv_cache_usage)
+
     def test_api_key_is_not_forwarded_by_a_redirect(self):
         import http.server
         seen: dict[str, list[str | None]] = {"first": [], "other": []}
@@ -1505,6 +1708,24 @@ class UiTests(unittest.IsolatedAsyncioTestCase):
         output = io.StringIO()
         Console(file=output, width=widget.content_size.width, color_system=None).print(widget.content)
         return output.getvalue()
+
+    async def test_llama_server_gauges_label_runtime_pool_in_inspector(self):
+        snap = snapshot()
+        row = snap.procs[0]
+        server = ServerInfo("llama-server", "http://127.0.0.1:8080",
+                            requests_running=0, requests_waiting=0, kv_cache_usage=0.0)
+        row.llm = build_view(row.detail, row.gpu.dedicated, row.gpu.shared, server)
+        with patch.object(GpuTaskManager, "poll"):
+            app = GpuTaskManager()
+            app.selected_key = "10"
+            async with app.run_test(size=(180, 50)) as pilot:
+                app.apply(snap)
+                await pilot.pause()
+                text = "\n".join(getattr(line, "plain", "") for line in
+                                 app.query_one("#inspector", Static).content.renderables)
+                self.assertIn("llama-server (runtime-reported): requests running 0, waiting 0, "
+                              "KV-cache pool 0.0%", text)
+                self.assertIn("not of GPU memory", text)
 
     async def test_monitoring_toggle_hides_diagnostics_without_changing_live_state(self):
         s = snapshot()
