@@ -332,8 +332,8 @@ class MemoryTests(unittest.TestCase):
         self.assertIsNone(s.nv.temp)
         self.assertIsNone(s.nv.power_w)
         self.assertIsNone(s.nv.sm_clock)
-        self.assertTrue(adapter.integrated_intel)
-        self.assertFalse(Adapter(2, "Intel Arc B580", 0x8086, 12 * GiB, 8 * GiB, False).integrated_intel)
+        self.assertTrue(adapter.integrated_gpu)
+        self.assertFalse(Adapter(2, "Intel Arc B580", 0x8086, 12 * GiB, 8 * GiB, False).integrated_gpu)
         gpu = s.procs[0].gpu
         self.assertEqual((gpu.dedicated, gpu.shared), (0, memory))
         data = to_dict(s)
@@ -343,6 +343,38 @@ class MemoryTests(unittest.TestCase):
         self.assertIn("VRAM 0 MB / 128 MB", text)
         self.assertIn("SHARED", text)
         self.assertIn("shared (in system RAM) 776 MB", text)
+
+    def test_qualcomm_wddm_reports_shared_memory_and_engine_activity(self):
+        memory = 45 * GiB
+        adapter = Adapter(1, "Qualcomm Adreno X2-85", 0x4D4F4351, 128 * MiB, 48 * GiB, False)
+        c = Collector.__new__(Collector)
+        c.adapter = adapter
+        c.adapters = [adapter]
+        c.gpu_index, c.scan_budget, c.host, c.host_status = 0, None, None, ""
+        c.nvml = Mock(ok=False)
+        c.counters = Mock(outside={})
+        c.counters.sample.return_value = (
+            {1: {42: ProcGpu(dedicated=memory, shared=0, committed=memory)}},
+            {1: AdapterGpu(dedicated=0, shared=memory, util_gpu=41.6)})
+        c.inspector, c.prober = Mock(), Mock()
+        c.inspector.get.return_value = ProcDetail(42, "example.exe")
+        with patch("gputaskman.collector.BACKEND", "wddm"):
+            s = c.sample()
+
+        self.assertEqual(adapter.vendor, "Qualcomm")
+        self.assertTrue(adapter.integrated_gpu)
+        self.assertEqual((s.vram_total, s.vram_used, s.shared_used), (128 * MiB, 0, memory))
+        self.assertFalse(s.shared_is_spill)
+        self.assertEqual((s.nv.source, s.nv.util_gpu), ("Windows WDDM", 42))
+        self.assertEqual(s.attributed, 0)
+        self.assertEqual((s.procs[0].gpu.dedicated, s.procs[0].gpu.shared), (0, memory))
+        data = to_dict(s)
+        self.assertEqual((data["processes"][0]["vram_bytes"], data["processes"][0]["shared_bytes"]), (0, memory))
+        self.assertIn("VRAM 0 MB / 128 MB", to_text(s))
+        self.assertIn("shared (in system RAM) 45.00 GB", to_text(s))
+        output = io.StringIO()
+        Console(file=output, width=160).print(GpuTaskManager().render_device(s))
+        self.assertNotIn("free 128 MB", output.getvalue())
 
     def test_lost_nvml_telemetry_is_explained_not_silent(self):
         c = Collector.__new__(Collector)

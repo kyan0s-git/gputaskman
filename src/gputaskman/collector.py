@@ -12,8 +12,8 @@ import psutil
 
 from .amdsmi import AmdSmi, _bdf
 from .adl import Adl
-from .dxgi import (VENDOR_AMD, VENDOR_NVIDIA, VENDOR_HUAWEI, VENDOR_INTEL, Adapter,
-                   adapter_driver_version)
+from .dxgi import (VENDOR_AMD, VENDOR_NVIDIA, VENDOR_HUAWEI, VENDOR_INTEL, VENDOR_QUALCOMM, Adapter,
+                  adapter_driver_version)
 from .handy import HandyEvidence, inspect_handy
 from .llm import LlmView, ServerProber, api_key, build_view, gb, ollama_log_path
 from . import nvml as nvml_mod
@@ -352,8 +352,8 @@ class Collector:
         luid = self.adapter.luid if self.adapter else (next(iter(per_luid), 0))
         procs = per_luid.get(luid, {})
         a = adapters.get(luid)
-        integrated_intel = BACKEND == "wddm" and self.adapter is not None and self.adapter.integrated_intel
-        if integrated_intel:
+        integrated_gpu = BACKEND == "wddm" and self.adapter is not None and self.adapter.integrated_gpu
+        if integrated_gpu:
             for gpu in procs.values():
                 if "dedicated" in gpu.available and gpu.dedicated > 0:
                     gpu.shared += gpu.dedicated
@@ -371,7 +371,8 @@ class Collector:
             # NVML can't describe this GPU, and a sweep of every NVIDIA device costs ~60 ms per device.
             if self.adapter.vendor_id == VENDOR_AMD:
                 nv = self.adl.sample() or self.amdsmi.sample()
-            elif self.adapter.vendor_id == VENDOR_INTEL and BACKEND == "wddm" and a and a.util_gpu is not None:
+            elif (self.adapter.vendor_id in (VENDOR_INTEL, VENDOR_QUALCOMM) and BACKEND == "wddm"
+                  and a and a.util_gpu is not None):
                 nv = DeviceTelemetry(index=self.gpu_index, source="Windows WDDM", util_gpu=round(a.util_gpu))
             else:
                 nv = None
@@ -390,7 +391,7 @@ class Collector:
             cuda=self.nvml.cuda_version if nv and nv.source == "NVML" else "", vram_total=total,
             vram_used=int(a.dedicated) if a and a.dedicated is not None else None,
             shared_used=int(a.shared) if a and a.shared is not None else None, backend=self.backend,
-            shared_is_spill=not (integrated_intel or (self.drm_card is not None and self.drm_card.integrated)),
+            shared_is_spill=not (integrated_gpu or (self.drm_card is not None and self.drm_card.integrated)),
         )
 
         snap.host_status = self.host_status
